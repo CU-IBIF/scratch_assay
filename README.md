@@ -35,6 +35,12 @@ make results easier to compare. CSV rows are written in natural filename order
 (`t2` precedes `t10`) purely so the output is readable and reproducible; no
 measurement depends on where an image falls in that order.
 
+You do not have to measure the whole project. The settings dialog opens with an
+**Images to measure** list; tick any subset (ctrl-click or shift-click for
+several) and only those are processed. Leave it untouched to measure
+everything. Selection is by position in the list, so a project containing two
+entries with the same image name still resolves to the one you ticked.
+
 ## Workflow
 
 For each image, independently:
@@ -45,9 +51,11 @@ For each image, independently:
    a saved QuPath pixel classifier.
 4. Restrict analysis to a centered field of view and apply binary close/open.
 5. Select the largest remaining component.
-6. Optionally refine the boundary in a narrow second-pass variance band.
-7. Add the final wound as a QuPath annotation and save the image data.
-8. Record the row, then release the image server before moving on.
+6. Fill holes enclosed by that component.
+7. Optionally refine the boundary in a narrow second-pass variance band, then
+   fill holes again.
+8. Add the final wound as a QuPath annotation and save the image data.
+9. Record the row, then release the image server before moving on.
 
 The output is written below the project directory:
 
@@ -68,11 +76,29 @@ the class **Scratch wound** and are replaced on a subsequent run.
 same image, so it is comparable across images without a baseline frame.
 `Detection_Status` is `FOUND` or `NOT_FOUND`; a `NOT_FOUND` row reports a zero
 area and is worth inspecting in the QC overlay before use.
+`Holes_Filled_px2` reports how much of the wound area came from the fill-holes
+step, which is a useful sanity check: a large value means a lot of the gap was
+occupied by cells or debris.
+
+### Fill holes
+
+Cells and debris that have settled in the gap are high-texture, so thresholding
+leaves them as unconnected islands *inside* the wound. Because the script keeps
+a single connected component, those islands survive as holes and the reported
+area comes out too low. **Fill holes in wound** (on by default) closes any
+background region that the wound fully encloses.
+
+Background reachable from the edge of the image is never filled, so a wound
+that runs off the side of the analysis field keeps its true shape and only
+genuine interior holes are closed. Turn the option off if you want the raw
+segmentation, and compare `Holes_Filled_px2` against `Wound_Area_px2` to see
+what it changed.
 
 ## Parameters
 
 | Setting | Meaning |
 |---|---|
+| Images to measure | Subset of project images to process; none selected means all |
 | Starting mask | Use the original variance threshold or a saved pixel classifier |
 | Saved pixel classifier | Project classifier evaluated for every image |
 | Classifier wound class | Exact classifier output class to treat as wound (case-insensitive) |
@@ -82,6 +108,7 @@ area and is worth inspecting in the QC overlay before use.
 | Texture smoothing | Gaussian sigma applied to that map |
 | Minimum wound area | Reject a smaller wound (full-resolution pixels²) |
 | Close/open iterations | Radius-1 binary morphology passes |
+| Fill holes in wound | Close background regions fully enclosed by the wound |
 | Second pass | Reclassify a band around the first boundary with a finer texture map |
 | Save masks | Write a binary mask PNG per image |
 | Save QC overlays | Write a QC overlay PNG per image |
@@ -100,7 +127,8 @@ The classifier is evaluated independently for every project image. Its class
 labels are read from the classification server metadata, so the script does not
 assume a numeric label. The selected class replaces the first-pass variance and
 Otsu steps; the analysis-field restriction, morphology, largest-component
-selection, and optional second-pass refinement are then applied normally.
+selection, hole filling, and optional second-pass refinement are then applied
+normally.
 Disable the second pass if the classifier boundary should be used without
 variance-based refinement. The saved classifier must be compatible with every
 image in the project (channels, resolution, and features).

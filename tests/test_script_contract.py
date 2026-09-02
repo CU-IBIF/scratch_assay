@@ -39,6 +39,14 @@ assert "getServer().close()" in text
 # Only the winning component is ever materialised as a full-size mask.
 assert "largestComponent" in text
 
+# Debris inside the gap punches holes in the wound; closing them is what makes
+# the reported area the true open area.
+assert "fillHoles" in text
+# The image picker resolves by position, so duplicate image names stay distinct.
+assert "selectedIndices" in text
+assert "SelectionMode.MULTIPLE" in text
+assert "Images to measure" in text
+
 # Images are measured independently: no tracking, baseline or elapsed time.
 for banned in ("selectComponent", "maxTrackShift", "frameInterval", "baselineArea",
                "Percent_Closure", "Tracking_Status", "Time_h"):
@@ -46,7 +54,7 @@ for banned in ("selectComponent", "maxTrackShift", "frameInterval", "baselineAre
 
 # Protect the stable CSV contract relied on by downstream analysis.
 header = re.search(r"List names=\[(.*?)\];def keys", text, re.S).group(1)
-for required in ("Image", "Wound_Area_px2", "Percent_Open", "Detection_Status"):
+for required in ("Image", "Wound_Area_px2", "Holes_Filled_px2", "Percent_Open", "Detection_Status"):
     assert f"'{required}'" in header
 # Image name is the key, so it must lead the row.
 assert header.startswith("'Image'")
