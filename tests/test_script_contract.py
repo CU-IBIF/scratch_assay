@@ -29,6 +29,8 @@ assert "q/w==p/w" not in text
 assert "getResource(" not in text
 # Date.format(String) comes from groovy-dateutil, which QuPath does not bundle.
 assert "new Date().format" not in text
+# QuPath runs scripts off the FX thread; the settings dialog must marshal onto it.
+assert "Platform.runLater" in text
 
 # Protect the stable CSV contract relied on by downstream analysis.
 header = re.search(r"List names=\[(.*?)\];def keys", text, re.S).group(1)

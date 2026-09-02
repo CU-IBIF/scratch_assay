@@ -6,6 +6,7 @@
  * script works in standard QuPath installations.
  */
 
+import javafx.application.Platform
 import javafx.geometry.Insets
 import javafx.scene.control.*
 import javafx.scene.layout.GridPane
@@ -30,6 +31,8 @@ import java.nio.file.Path
 import java.text.DecimalFormat
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.Callable
+import java.util.concurrent.FutureTask
 
 final String VERSION = '1.0.0'
 def project = getProject()
@@ -143,7 +146,20 @@ writeCsv(output.resolve('Scratch_Assay_Texture_Tracking.csv'), rows)
 writeSettings(output.resolve('Scratch_Assay_Settings.txt'), VERSION, cfg, entries*.getImageName())
 Dialogs.showInfoNotification('Scratch Assay Analyzer', "Processed ${entries.size()} image(s). Results: ${output}")
 
+/**
+ * QuPath runs scripts on a background thread, but JavaFX windows can only be
+ * built and shown on the FX application thread. Marshal there and block until
+ * the user dismisses the dialog.
+ */
 Map showSettings(project) {
+    if (Platform.isFxApplicationThread())
+        return buildSettingsDialog(project)
+    def task = new FutureTask<Map>({ buildSettingsDialog(project) } as Callable)
+    Platform.runLater(task)
+    return task.get()
+}
+
+Map buildSettingsDialog(project) {
     List classifierNames
     try {
         classifierNames = new ArrayList(project.getPixelClassifiers().getNames()).sort()
