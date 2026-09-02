@@ -85,6 +85,10 @@ entries.eachWithIndex { entry, frame ->
         pass1 = new boolean[w*h]
         for (int i=0; i<pass1.length; i++) pass1[i] = field[i] && texture1[i] <= cut1
     }
+    float[] texture1 = gaussian(localVariance(gray, w, h, cfg.varianceRadius as int), w, h, cfg.smoothSigma as double)
+    double cut1 = otsu(texture1, field)
+    boolean[] pass1 = new boolean[w*h]
+    for (int i=0; i<pass1.length; i++) pass1[i] = field[i] && texture1[i] <= cut1
     pass1 = morphology(pass1, w, h, cfg.closeIterations as int, cfg.openIterations as int)
     List components = components(pass1, w, h, (cfg.minArea / (ds*ds)) as int)
     Map selected = selectComponent(components, previous, cfg.maxTrackShift / ds)
@@ -150,6 +154,8 @@ Map showSettings(project) {
     }
     def fields = [
         inputMode:new ComboBox(), classifierName:new ComboBox(), woundClass:new TextField('Wound'),
+Map showSettings() {
+    def fields = [
         downsample:new TextField('2'), analysisPercent:new TextField('90'), varianceRadius:new TextField('5'),
         smoothSigma:new TextField('2'), minArea:new TextField('5000'), closeIterations:new TextField('2'),
         openIterations:new TextField('1'), maxTrackShift:new TextField('250'), frameInterval:new TextField('1'),
@@ -164,6 +170,8 @@ Map showSettings(project) {
     if (!classifierNames.empty) fields.classifierName.value=classifierNames[0]
     fields.secondPass.selected=true; fields.saveMasks.selected=true
     def labels=['Starting mask','Saved pixel classifier','Classifier wound class','Downsample','Analysis field (%)','Variance radius (analysis px)','Texture smoothing sigma',
+    fields.secondPass.selected=true; fields.saveMasks.selected=true
+    def labels=['Downsample','Analysis field (%)','Variance radius (analysis px)','Texture smoothing sigma',
                 'Minimum wound area (full-res px²)','Close iterations','Open iterations',
                 'Maximum tracking shift (full-res px)','Frame interval (hours)','Enable second pass',
                 'Refinement band (full-res px)','Refinement variance radius','Refinement smoothing sigma',
@@ -178,6 +186,7 @@ Map showSettings(project) {
         Map f=result.get()
         Map c=[inputMode:f.inputMode.value, classifierName:(f.classifierName.editor.text ?: f.classifierName.value ?: '').trim(),
                woundClass:f.woundClass.text.trim(), downsample:positive(f.downsample.text,'Downsample'), analysisPercent:positive(f.analysisPercent.text,'Analysis field'),
+        Map c=[downsample:positive(f.downsample.text,'Downsample'), analysisPercent:positive(f.analysisPercent.text,'Analysis field'),
                varianceRadius:nonnegativeInt(f.varianceRadius.text,'Variance radius'), smoothSigma:nonnegative(f.smoothSigma.text,'Smoothing'),
                minArea:positive(f.minArea.text,'Minimum area'), closeIterations:nonnegativeInt(f.closeIterations.text,'Close iterations'),
                openIterations:nonnegativeInt(f.openIterations.text,'Open iterations'), maxTrackShift:positive(f.maxTrackShift.text,'Tracking shift'),

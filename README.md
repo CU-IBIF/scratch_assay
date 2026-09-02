@@ -36,8 +36,12 @@ The QuPath script mirrors the validated parts of the ImageJ v5.5 workflow:
 
 1. Read each image at a configurable downsample.
 2. Convert RGB to luminance and compute a local variance (texture) image.
+
 3. Create the initial wound mask either from the variance/Otsu workflow or from
    a saved QuPath pixel classifier.
+=======
+3. Smooth the texture image and apply an Otsu threshold. Low texture is wound.
+
 4. Restrict analysis to a centered field of view and apply binary close/open.
 5. Select the largest component on the first frame, then the nearest plausible
    component on subsequent frames.
@@ -64,9 +68,12 @@ the class **Scratch wound** and are replaced on a subsequent run.
 
 | Setting | Meaning |
 |---|---|
+
 | Starting mask | Use the original variance threshold or a saved pixel classifier |
 | Saved pixel classifier | Project classifier evaluated for every time point |
 | Classifier wound class | Exact classifier output class to treat as wound (case-insensitive) |
+=======
+
 | Downsample | Scale used to read images; larger values save memory |
 | Analysis field (%) | Centered width and height included in analysis |
 | Variance radius | Neighborhood radius for the first texture map |
@@ -76,6 +83,7 @@ the class **Scratch wound** and are replaced on a subsequent run.
 | Maximum tracking shift | Largest accepted centroid motion (full-resolution pixels) |
 | Second pass | Reclassify a band around the first boundary with a finer texture map |
 | Frame interval | Elapsed hours between naturally ordered project entries |
+
 
 ### Using a trained QuPath pixel classifier
 
@@ -95,6 +103,8 @@ optional second-pass refinement are then applied normally. Disable the second
 pass if the classifier boundary should be used without variance-based
 refinement. The saved classifier must be compatible with every image in the
 time series (channels, resolution, and features).
+
+=======
 
 ## Validation notes
 
