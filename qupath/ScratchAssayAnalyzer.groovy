@@ -17,10 +17,10 @@ import qupath.lib.objects.classes.PathClassFactory
 import qupath.lib.regions.ImagePlane
 import qupath.lib.regions.RegionRequest
 import qupath.lib.roi.ROIs
-import qupath.lib.classifiers.pixel.PixelClassifierTools
+import qupath.opencv.ml.pixel.PixelClassifierTools
 
 import javax.imageio.ImageIO
-import java.awt.*
+import java.awt.Graphics2D
 import java.awt.geom.Area
 import java.awt.geom.Rectangle2D
 import java.awt.image.BufferedImage
@@ -28,6 +28,8 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.text.DecimalFormat
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 
 final String VERSION = '1.0.0'
 def project = getProject()
@@ -85,10 +87,6 @@ entries.eachWithIndex { entry, frame ->
         pass1 = new boolean[w*h]
         for (int i=0; i<pass1.length; i++) pass1[i] = field[i] && texture1[i] <= cut1
     }
-    float[] texture1 = gaussian(localVariance(gray, w, h, cfg.varianceRadius as int), w, h, cfg.smoothSigma as double)
-    double cut1 = otsu(texture1, field)
-    boolean[] pass1 = new boolean[w*h]
-    for (int i=0; i<pass1.length; i++) pass1[i] = field[i] && texture1[i] <= cut1
     pass1 = morphology(pass1, w, h, cfg.closeIterations as int, cfg.openIterations as int)
     List components = components(pass1, w, h, (cfg.minArea / (ds*ds)) as int)
     Map selected = selectComponent(components, previous, cfg.maxTrackShift / ds)
@@ -154,8 +152,6 @@ Map showSettings(project) {
     }
     def fields = [
         inputMode:new ComboBox(), classifierName:new ComboBox(), woundClass:new TextField('Wound'),
-Map showSettings() {
-    def fields = [
         downsample:new TextField('2'), analysisPercent:new TextField('90'), varianceRadius:new TextField('5'),
         smoothSigma:new TextField('2'), minArea:new TextField('5000'), closeIterations:new TextField('2'),
         openIterations:new TextField('1'), maxTrackShift:new TextField('250'), frameInterval:new TextField('1'),
@@ -170,8 +166,6 @@ Map showSettings() {
     if (!classifierNames.empty) fields.classifierName.value=classifierNames[0]
     fields.secondPass.selected=true; fields.saveMasks.selected=true
     def labels=['Starting mask','Saved pixel classifier','Classifier wound class','Downsample','Analysis field (%)','Variance radius (analysis px)','Texture smoothing sigma',
-    fields.secondPass.selected=true; fields.saveMasks.selected=true
-    def labels=['Downsample','Analysis field (%)','Variance radius (analysis px)','Texture smoothing sigma',
                 'Minimum wound area (full-res px²)','Close iterations','Open iterations',
                 'Maximum tracking shift (full-res px)','Frame interval (hours)','Enable second pass',
                 'Refinement band (full-res px)','Refinement variance radius','Refinement smoothing sigma',
@@ -186,7 +180,6 @@ Map showSettings() {
         Map f=result.get()
         Map c=[inputMode:f.inputMode.value, classifierName:(f.classifierName.editor.text ?: f.classifierName.value ?: '').trim(),
                woundClass:f.woundClass.text.trim(), downsample:positive(f.downsample.text,'Downsample'), analysisPercent:positive(f.analysisPercent.text,'Analysis field'),
-        Map c=[downsample:positive(f.downsample.text,'Downsample'), analysisPercent:positive(f.analysisPercent.text,'Analysis field'),
                varianceRadius:nonnegativeInt(f.varianceRadius.text,'Variance radius'), smoothSigma:nonnegative(f.smoothSigma.text,'Smoothing'),
                minArea:positive(f.minArea.text,'Minimum area'), closeIterations:nonnegativeInt(f.closeIterations.text,'Close iterations'),
                openIterations:nonnegativeInt(f.openIterations.text,'Open iterations'), maxTrackShift:positive(f.maxTrackShift.text,'Tracking shift'),
@@ -212,7 +205,7 @@ Map showSettings() {
 boolean[] classifierMask(project, imageData, String classifierName, String woundClass,
                          int targetW, int targetH, double downsample) {
     def manager = project.getPixelClassifiers()
-    def classifier = manager.getResource(classifierName)
+    def classifier = manager.get(classifierName)
     if (classifier == null)
         throw new IllegalArgumentException("Saved pixel classifier not found: ${classifierName}")
 
@@ -282,7 +275,7 @@ boolean[] erode(boolean[] a,int w,int h,int radius){boolean[] out=a;for(int n=0;
 
 List components(boolean[] mask,int w,int h,int minimum){boolean[] seen=new boolean[mask.length];List result=[];int[] queue=new int[mask.length]
     for(int seed=0;seed<mask.length;seed++)if(mask[seed]&&!seen[seed]){int head=0,tail=0;queue[tail++]=seed;seen[seed]=true;long sx=0,sy=0
-        while(head<tail){int p=queue[head++],x=p%w,y=(int)(p/w);sx+=x;sy+=y;int[] ns=[p-1,p+1,p-w,p+w];for(int q:ns)if(q>=0&&q<mask.length&&!seen[q]&&mask[q]&&(q/w==p/w||q%w==p%w)){seen[q]=true;queue[tail++]=q}}
+        while(head<tail){int p=queue[head++],x=p%w,y=(int)(p/w);sx+=x;sy+=y;int[] ns=[p-1,p+1,p-w,p+w];for(int q:ns)if(q>=0&&q<mask.length&&!seen[q]&&mask[q]&&((int)(q/w)==(int)(p/w)||q%w==p%w)){seen[q]=true;queue[tail++]=q}}
         if(tail>=minimum){boolean[] own=new boolean[mask.length];for(int i=0;i<tail;i++)own[queue[i]]=true;result<<[mask:own,area:tail,cx:sx/(double)tail,cy:sy/(double)tail]}}
     result}
 Map selectComponent(List c,Map previous,double shift){if(c.empty)return null;if(previous==null)return c.max{it.area};Map n=nearest(c,previous.cx as double,previous.cy as double);Math.hypot(n.cx-previous.cx,n.cy-previous.cy)<=shift?n:null}
@@ -302,6 +295,6 @@ BufferedImage qcImage(BufferedImage source,boolean[] p1,boolean[] fin,int mx,int
 boolean boundary(boolean[] m,int i,int w){m[i]&&(!m[i-1]||!m[i+1]||!m[i-w]||!m[i+w])}
 
 void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=['Frame','Time_h','Image','Wound_Area_px2','Wound_Area_um2','Percent_Open','Percent_Closure','Mean_Width_px','Median_Width_px','Width_SD_px','Width_Samples','Centroid_X_px','Centroid_Y_px','Pass1_Threshold','Pass2_Threshold','Tracking_Status','Refinement_Status'];def keys=['frame','time','image','areaPx','areaUm2','percentOpen','closure','meanWidth','medianWidth','widthSD','widthSamples','centroidX','centroidY','threshold1','threshold2','tracking','refinement'];List lines=[names.join(',')];rows.each{r->lines<<keys.collect{k->def v=r[k];v instanceof Number?(Double.isFinite(v as double)?d.format(v):'NA'):('"'+v.toString().replace('"','""')+'"')}.join(',')};Files.write(p,lines,StandardCharsets.UTF_8)}
-void writeSettings(Path p,String version,Map cfg,List order){List lines=["Scratch Assay Analyzer version=${version}","Generated=${new Date().format("yyyy-MM-dd'T'HH:mm:ssXXX")}"];cfg.each{k,v->lines<<"${k}=${v}"};lines<<'Frame order:';order.eachWithIndex{n,i->lines<<"${i+1}\t${n}"};Files.write(p,lines,StandardCharsets.UTF_8)}
+void writeSettings(Path p,String version,Map cfg,List order){List lines=["Scratch Assay Analyzer version=${version}","Generated=${ZonedDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX"))}"];cfg.each{k,v->lines<<"${k}=${v}"};lines<<'Frame order:';order.eachWithIndex{n,i->lines<<"${i+1}\t${n}"};Files.write(p,lines,StandardCharsets.UTF_8)}
 String safeStem(String n){n.replaceFirst(/\.[^.]+$/,'').replaceAll(/[^A-Za-z0-9._-]+/,'_')}
 int naturalCompare(String a,String b){def aa=a.toLowerCase().split(/(?<=\D)(?=\d)|(?<=\d)(?=\D)/),bb=b.toLowerCase().split(/(?<=\D)(?=\d)|(?<=\d)(?=\D)/);for(int i=0;i<Math.min(aa.length,bb.length);i++){int c=(aa[i]==~ /\d+/&&bb[i]==~ /\d+/)?new BigInteger(aa[i])<=>new BigInteger(bb[i]):aa[i]<=>bb[i];if(c)return c};aa.length<=>bb.length}
