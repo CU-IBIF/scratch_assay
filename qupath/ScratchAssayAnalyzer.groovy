@@ -17,6 +17,7 @@ import qupath.lib.objects.classes.PathClassFactory
 import qupath.lib.regions.ImagePlane
 import qupath.lib.regions.RegionRequest
 import qupath.lib.roi.ROIs
+import qupath.lib.classifiers.pixel.PixelClassifierTools
 
 import javax.imageio.ImageIO
 import java.awt.*
@@ -35,7 +36,7 @@ if (project == null) {
     return
 }
 
-Map cfg = showSettings()
+Map cfg = showSettings(project)
 if (cfg == null) return
 
 List entries = new ArrayList(project.getImageList())
@@ -72,6 +73,18 @@ entries.eachWithIndex { entry, frame ->
     for (int y = marginY; y < h - marginY; y++)
         Arrays.fill(field, y*w + marginX, y*w + (w-marginX), true)
 
+    boolean[] pass1
+    double cut1 = Double.NaN
+    if (cfg.inputMode == 'Pixel classifier') {
+        pass1 = classifierMask(project, imageData, cfg.classifierName as String,
+            cfg.woundClass as String, w, h, ds)
+        for (int i=0; i<pass1.length; i++) pass1[i] = pass1[i] && field[i]
+    } else {
+        float[] texture1 = gaussian(localVariance(gray, w, h, cfg.varianceRadius as int), w, h, cfg.smoothSigma as double)
+        cut1 = otsu(texture1, field)
+        pass1 = new boolean[w*h]
+        for (int i=0; i<pass1.length; i++) pass1[i] = field[i] && texture1[i] <= cut1
+    }
     float[] texture1 = gaussian(localVariance(gray, w, h, cfg.varianceRadius as int), w, h, cfg.smoothSigma as double)
     double cut1 = otsu(texture1, field)
     boolean[] pass1 = new boolean[w*h]
@@ -132,6 +145,15 @@ writeCsv(output.resolve('Scratch_Assay_Texture_Tracking.csv'), rows)
 writeSettings(output.resolve('Scratch_Assay_Settings.txt'), VERSION, cfg, entries*.getImageName())
 Dialogs.showInfoNotification('Scratch Assay Analyzer', "Processed ${entries.size()} image(s). Results: ${output}")
 
+Map showSettings(project) {
+    List classifierNames
+    try {
+        classifierNames = new ArrayList(project.getPixelClassifiers().getNames()).sort()
+    } catch (Exception ignored) {
+        classifierNames = []
+    }
+    def fields = [
+        inputMode:new ComboBox(), classifierName:new ComboBox(), woundClass:new TextField('Wound'),
 Map showSettings() {
     def fields = [
         downsample:new TextField('2'), analysisPercent:new TextField('90'), varianceRadius:new TextField('5'),
@@ -141,6 +163,13 @@ Map showSettings() {
         refineSmoothSigma:new TextField('1'), refineCloseIterations:new TextField('1'),
         refineOpenIterations:new TextField('0'), saveMasks:new CheckBox()
     ]
+    fields.inputMode.items.addAll('Variance threshold', 'Pixel classifier')
+    fields.inputMode.value='Variance threshold'
+    fields.classifierName.items.addAll(classifierNames)
+    fields.classifierName.editable=true
+    if (!classifierNames.empty) fields.classifierName.value=classifierNames[0]
+    fields.secondPass.selected=true; fields.saveMasks.selected=true
+    def labels=['Starting mask','Saved pixel classifier','Classifier wound class','Downsample','Analysis field (%)','Variance radius (analysis px)','Texture smoothing sigma',
     fields.secondPass.selected=true; fields.saveMasks.selected=true
     def labels=['Downsample','Analysis field (%)','Variance radius (analysis px)','Texture smoothing sigma',
                 'Minimum wound area (full-res px²)','Close iterations','Open iterations',
@@ -155,6 +184,8 @@ Map showSettings() {
     def result=dialog.showAndWait(); if (!result.isPresent()) return null
     try {
         Map f=result.get()
+        Map c=[inputMode:f.inputMode.value, classifierName:(f.classifierName.editor.text ?: f.classifierName.value ?: '').trim(),
+               woundClass:f.woundClass.text.trim(), downsample:positive(f.downsample.text,'Downsample'), analysisPercent:positive(f.analysisPercent.text,'Analysis field'),
         Map c=[downsample:positive(f.downsample.text,'Downsample'), analysisPercent:positive(f.analysisPercent.text,'Analysis field'),
                varianceRadius:nonnegativeInt(f.varianceRadius.text,'Variance radius'), smoothSigma:nonnegative(f.smoothSigma.text,'Smoothing'),
                minArea:positive(f.minArea.text,'Minimum area'), closeIterations:nonnegativeInt(f.closeIterations.text,'Close iterations'),
@@ -165,8 +196,52 @@ Map showSettings() {
                refineCloseIterations:nonnegativeInt(f.refineCloseIterations.text,'Refinement close'),
                refineOpenIterations:nonnegativeInt(f.refineOpenIterations.text,'Refinement open'), saveMasks:f.saveMasks.selected]
         if (c.analysisPercent > 100) throw new IllegalArgumentException('Analysis field must not exceed 100')
+        if (c.inputMode == 'Pixel classifier' && !c.classifierName)
+            throw new IllegalArgumentException('Choose or enter a saved pixel classifier')
+        if (c.inputMode == 'Pixel classifier' && !c.woundClass)
+            throw new IllegalArgumentException('Enter the classifier class that represents the wound')
         return c
     } catch(Exception e) { Dialogs.showErrorMessage('Invalid settings',e.message); return null }
+}
+
+/**
+ * Evaluate a saved QuPath pixel classifier and turn one of its labelled output
+ * classes into the initial binary wound mask. Classification labels are read
+ * from server metadata rather than assuming that the wound is label 0 or 1.
+ */
+boolean[] classifierMask(project, imageData, String classifierName, String woundClass,
+                         int targetW, int targetH, double downsample) {
+    def manager = project.getPixelClassifiers()
+    def classifier = manager.getResource(classifierName)
+    if (classifier == null)
+        throw new IllegalArgumentException("Saved pixel classifier not found: ${classifierName}")
+
+    def classificationServer = PixelClassifierTools.createPixelClassificationServer(imageData, classifier)
+    Map labels = classificationServer.getMetadata().getClassificationLabels()
+    def match = labels.find { key, pathClass ->
+        String name = pathClass == null ? '' : (pathClass.respondsTo('getName') ? pathClass.getName() : pathClass.toString())
+        name.equalsIgnoreCase(woundClass)
+    }
+    if (match == null) {
+        String available = labels.values().collect { it == null ? '(unclassified)' : it.toString() }.join(', ')
+        throw new IllegalArgumentException("Class '${woundClass}' is not an output of '${classifierName}'. Available classes: ${available}")
+    }
+
+    def request = RegionRequest.createInstance(classificationServer.getPath(), downsample,
+        0, 0, classificationServer.getWidth(), classificationServer.getHeight())
+    BufferedImage classified = classificationServer.readRegion(request)
+    int wanted = match.key as int
+    boolean[] mask = new boolean[targetW * targetH]
+    // Image servers can differ by one pixel because dimensions are rounded at
+    // a downsample. Nearest-neighbour lookup preserves categorical labels.
+    for (int y=0; y<targetH; y++) {
+        int sy = Math.min(classified.height-1, (int)(y * classified.height / (double)targetH))
+        for (int x=0; x<targetW; x++) {
+            int sx = Math.min(classified.width-1, (int)(x * classified.width / (double)targetW))
+            mask[y*targetW+x] = classified.raster.getSample(sx, sy, 0) == wanted
+        }
+    }
+    return mask
 }
 
 double positive(String s,String n){ double v=Double.parseDouble(s); if(!(v>0))throw new IllegalArgumentException("$n must be > 0");v }

@@ -14,6 +14,11 @@ assert "Scratch wound (generated)" in text
 assert "entry.saveImageData(imageData)" in text
 assert "RegionRequest.createInstance" in text
 assert "100_000_000L" in text
+assert "PixelClassifierTools.createPixelClassificationServer" in text
+assert "qupath.lib.classifiers.pixel.PixelClassifierTools" in text
+assert "getClassificationLabels" in text
+assert "classifierMask(project, imageData" in text
+assert "Starting mask" in text
 
 # Protect the stable CSV contract relied on by downstream analysis.
 header = re.search(r"List names=\[(.*?)\];def keys", text, re.S).group(1)
