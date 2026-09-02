@@ -45,17 +45,27 @@ if (project == null) {
     return
 }
 
-Map cfg = showSettings(project)
-if (cfg == null) return
-
 List entries = new ArrayList(project.getImageList())
 if (entries.isEmpty()) {
     Dialogs.showErrorMessage('Scratch Assay Analyzer', 'The current project contains no images.')
     return
 }
 // Ordering is presentation only - it makes the CSV readable and the run
-// reproducible. No measurement depends on the position of an image.
+// reproducible. No measurement depends on the position of an image. It is
+// settled before the dialog so that the picker and this list stay aligned.
 entries.sort { a, b -> naturalCompare(a.getImageName(), b.getImageName()) }
+
+Map cfg = showSettings(project, entries)
+if (cfg == null) return
+
+// The picker returns positions rather than names, so a project holding two
+// entries with the same image name still resolves to the one that was ticked.
+List picked = cfg.remove('selectedIndices') as List
+if (picked) entries = picked.collect { entries[it as int] }
+if (entries.isEmpty()) {
+    Dialogs.showErrorMessage('Scratch Assay Analyzer', 'No images were selected.')
+    return
+}
 
 Path output = Path.of(project.getPath().getParent().toString(), 'Scratch_Assay_Results')
 Path qcDir = output.resolve('QC')
@@ -118,6 +128,9 @@ Map analyseImage(project, entry, Map cfg, Path maskDir, Path qcDir) {
         Map selected = largestComponent(pass1, w, h, (cfg.minArea / (ds*ds)) as int)
         pass1 = null
         boolean[] firstMask = selected == null ? new boolean[w*h] : selected.mask
+        // Cells and debris sitting in the gap read as high texture, so they
+        // punch holes in the wound. Closing them recovers the true open area.
+        long holesFilled = (selected != null && cfg.fillHoles) ? fillHoles(firstMask, w, h) : 0L
         boolean[] finalMask = firstMask
         double cut2 = Double.NaN
         String refineStatus = cfg.secondPass ? 'NO_COMPONENT' : 'DISABLED'
@@ -140,6 +153,9 @@ Map analyseImage(project, entry, Map cfg, Path maskDir, Path qcDir) {
             if (best != null) {
                 finalMask = best.mask
                 selected = best
+                // Refinement re-derives the boundary, so holes must be closed
+                // again; the reported count always describes the final mask.
+                if (cfg.fillHoles) holesFilled = fillHoles(finalMask, w, h)
                 refineStatus = 'APPLIED'
             } else refineStatus = 'FALLBACK'
         }
@@ -161,6 +177,7 @@ Map analyseImage(project, entry, Map cfg, Path maskDir, Path qcDir) {
 
         return [image:entry.getImageName(), areaPx:areaPx,
                 areaUm2:Double.isNaN(pixelUm) ? Double.NaN : areaPx*pixelUm*pixelUm,
+                holesFilled:holesFilled*ds*ds,
                 percentOpen:100d*m.area/Math.max(1L, fieldArea),
                 meanWidth:m.meanWidth*ds, medianWidth:m.medianWidth*ds, widthSD:m.widthSD*ds,
                 widthSamples:m.samples, centroidX:m.cx*ds, centroidY:m.cy*ds,
@@ -195,15 +212,15 @@ void checkMemoryBudget(String name, int w, int h, Map cfg) {
  * built and shown on the FX application thread. Marshal there and block until
  * the user dismisses the dialog.
  */
-Map showSettings(project) {
+Map showSettings(project, List entries) {
     if (Platform.isFxApplicationThread())
-        return buildSettingsDialog(project)
-    def task = new FutureTask<Map>({ buildSettingsDialog(project) } as Callable)
+        return buildSettingsDialog(project, entries)
+    def task = new FutureTask<Map>({ buildSettingsDialog(project, entries) } as Callable)
     Platform.runLater(task)
     return task.get()
 }
 
-Map buildSettingsDialog(project) {
+Map buildSettingsDialog(project, List entries) {
     List classifierNames
     try {
         classifierNames = new ArrayList(project.getPixelClassifiers().getNames()).sort()
@@ -211,38 +228,52 @@ Map buildSettingsDialog(project) {
         classifierNames = []
     }
     def fields = [
-        inputMode:new ComboBox(), classifierName:new ComboBox(), woundClass:new TextField('Wound'),
+        images:new ListView<String>(), inputMode:new ComboBox(), classifierName:new ComboBox(),
+        woundClass:new TextField('Wound'),
         downsample:new TextField('4'), analysisPercent:new TextField('90'), varianceRadius:new TextField('5'),
         smoothSigma:new TextField('2'), minArea:new TextField('5000'), closeIterations:new TextField('2'),
-        openIterations:new TextField('1'), secondPass:new CheckBox(), refineBand:new TextField('20'),
+        openIterations:new TextField('1'), fillHoles:new CheckBox(), secondPass:new CheckBox(),
+        refineBand:new TextField('20'),
         refineVarianceRadius:new TextField('3'), refineSmoothSigma:new TextField('1'),
         refineCloseIterations:new TextField('1'), refineOpenIterations:new TextField('0'),
         saveMasks:new CheckBox(), saveQC:new CheckBox()
     ]
+    // Positions in this list match the caller's sorted entry list one for one.
+    fields.images.items.addAll(entries*.getImageName())
+    fields.images.selectionModel.selectionMode=SelectionMode.MULTIPLE
+    fields.images.prefHeight=140
     fields.inputMode.items.addAll('Variance threshold', 'Pixel classifier')
     fields.inputMode.value='Variance threshold'
     fields.classifierName.items.addAll(classifierNames)
     fields.classifierName.editable=true
     if (!classifierNames.empty) fields.classifierName.value=classifierNames[0]
+    fields.fillHoles.selected=true
     fields.secondPass.selected=true; fields.saveMasks.selected=true; fields.saveQC.selected=true
-    def labels=['Starting mask','Saved pixel classifier','Classifier wound class','Downsample','Analysis field (%)',
+    def labels=["Images to measure (none = all ${entries.size()})",
+                'Starting mask','Saved pixel classifier','Classifier wound class','Downsample','Analysis field (%)',
                 'Variance radius (analysis px)','Texture smoothing sigma',
-                'Minimum wound area (full-res px²)','Close iterations','Open iterations','Enable second pass',
+                'Minimum wound area (full-res px²)','Close iterations','Open iterations',
+                'Fill holes in wound','Enable second pass',
                 'Refinement band (full-res px)','Refinement variance radius','Refinement smoothing sigma',
                 'Refinement close iterations','Refinement open iterations','Save masks','Save QC overlays']
     def grid=new GridPane(hgap:10,vgap:7,padding:new Insets(12))
     fields.values().eachWithIndex { node,i -> grid.add(new Label(labels[i]),0,i); grid.add(node,1,i) }
     def dialog=new Dialog<Map>(); dialog.title='Scratch Assay Analyzer'; dialog.initModality(Modality.APPLICATION_MODAL)
-    dialog.dialogPane.content=grid; dialog.dialogPane.buttonTypes.addAll(ButtonType.OK,ButtonType.CANCEL)
+    // The picker makes the form tall enough to overflow a small screen.
+    def scroll=new ScrollPane(grid); scroll.fitToWidth=true; scroll.prefViewportHeight=600
+    dialog.dialogPane.content=scroll; dialog.resizable=true
+    dialog.dialogPane.buttonTypes.addAll(ButtonType.OK,ButtonType.CANCEL)
     dialog.setResultConverter { it==ButtonType.OK ? fields : null }
     def result=dialog.showAndWait(); if (!result.isPresent()) return null
     try {
         Map f=result.get()
-        Map c=[inputMode:f.inputMode.value, classifierName:(f.classifierName.editor.text ?: f.classifierName.value ?: '').trim(),
+        Map c=[selectedIndices:new ArrayList(f.images.selectionModel.selectedIndices),
+               inputMode:f.inputMode.value, classifierName:(f.classifierName.editor.text ?: f.classifierName.value ?: '').trim(),
                woundClass:f.woundClass.text.trim(), downsample:positive(f.downsample.text,'Downsample'), analysisPercent:positive(f.analysisPercent.text,'Analysis field'),
                varianceRadius:nonnegativeInt(f.varianceRadius.text,'Variance radius'), smoothSigma:nonnegative(f.smoothSigma.text,'Smoothing'),
                minArea:positive(f.minArea.text,'Minimum area'), closeIterations:nonnegativeInt(f.closeIterations.text,'Close iterations'),
-               openIterations:nonnegativeInt(f.openIterations.text,'Open iterations'), secondPass:f.secondPass.selected,
+               openIterations:nonnegativeInt(f.openIterations.text,'Open iterations'),
+               fillHoles:f.fillHoles.selected, secondPass:f.secondPass.selected,
                refineBand:positive(f.refineBand.text,'Refinement band'), refineVarianceRadius:nonnegativeInt(f.refineVarianceRadius.text,'Refinement radius'),
                refineSmoothSigma:nonnegative(f.refineSmoothSigma.text,'Refinement smoothing'),
                refineCloseIterations:nonnegativeInt(f.refineCloseIterations.text,'Refinement close'),
@@ -439,6 +470,32 @@ Map largestComponent(boolean[] mask,int w,int h,int minimum){
     [mask:own,area:stats[0],cx:stats[1]/(double)stats[0],cy:stats[2]/(double)stats[0]]
 }
 
+/**
+ * Fill background pockets that the mask fully encloses, and return how many
+ * pixels were added. Background reachable from the image border is left alone,
+ * so a wound that runs off the edge of the analysis field is not flooded shut -
+ * only genuine interior holes, the cells and debris inside the gap, are closed.
+ */
+long fillHoles(boolean[] mask,int w,int h){
+    boolean[] outside=new boolean[mask.length]
+    int[] queue=new int[mask.length]
+    int head=0,tail=0
+    for(int x=0;x<w;x++){int top=x,bottom=(h-1)*w+x
+        if(!mask[top]&&!outside[top]){outside[top]=true;queue[tail++]=top}
+        if(!mask[bottom]&&!outside[bottom]){outside[bottom]=true;queue[tail++]=bottom}}
+    for(int y=0;y<h;y++){int left=y*w,right=y*w+w-1
+        if(!mask[left]&&!outside[left]){outside[left]=true;queue[tail++]=left}
+        if(!mask[right]&&!outside[right]){outside[right]=true;queue[tail++]=right}}
+    while(head<tail){int p=queue[head++],y=Math.floorDiv(p,w),x=p-y*w
+        if(x>0&&!mask[p-1]&&!outside[p-1]){outside[p-1]=true;queue[tail++]=p-1}
+        if(x<w-1&&!mask[p+1]&&!outside[p+1]){outside[p+1]=true;queue[tail++]=p+1}
+        if(y>0&&!mask[p-w]&&!outside[p-w]){outside[p-w]=true;queue[tail++]=p-w}
+        if(y<h-1&&!mask[p+w]&&!outside[p+w]){outside[p+w]=true;queue[tail++]=p+w}}
+    long filled=0
+    for(int i=0;i<mask.length;i++)if(!mask[i]&&!outside[i]){mask[i]=true;filled++}
+    filled
+}
+
 Map measurements(boolean[] m,int w,int h){long area=0,sx=0,sy=0;List widths=[];for(int y=0;y<h;y++){int first=-1,last=-1;for(int x=0;x<w;x++)if(m[y*w+x]){area++;sx+=x;sy+=y;if(first<0)first=x;last=x};if(first>=0)widths<<last-first+1}
     if(area==0)return [area:0,cx:Double.NaN,cy:Double.NaN,meanWidth:Double.NaN,medianWidth:Double.NaN,widthSD:Double.NaN,samples:0]
     widths.sort();double mean=widths.sum()/(double)widths.size(),med=widths.size()%2?widths[widths.size()/2]:(widths[widths.size()/2-1]+widths[widths.size()/2])/2d
@@ -452,7 +509,7 @@ BufferedImage maskImage(boolean[] m,int w,int h){BufferedImage out=new BufferedI
 BufferedImage qcImage(BufferedImage source,boolean[] p1,boolean[] fin,int mx,int my){int w=source.width,h=source.height;BufferedImage out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB);Graphics2D g=out.createGraphics();g.drawImage(source,0,0,null);g.dispose();for(int y=1;y<h-1;y++)for(int x=1;x<w-1;x++){int i=y*w+x;if(boundary(p1,i,w)&&!boundary(fin,i,w))out.setRGB(x,y,0xFFFF00);if(boundary(fin,i,w))out.setRGB(x,y,0xFF0000)};for(int x=mx;x<w-mx;x++){out.setRGB(x,my,0x00FFFF);out.setRGB(x,h-my-1,0x00FFFF)};for(int y=my;y<h-my;y++){out.setRGB(mx,y,0x00FFFF);out.setRGB(w-mx-1,y,0x00FFFF)};out}
 boolean boundary(boolean[] m,int i,int w){m[i]&&(!m[i-1]||!m[i+1]||!m[i-w]||!m[i+w])}
 
-void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=['Image','Wound_Area_px2','Wound_Area_um2','Percent_Open','Mean_Width_px','Median_Width_px','Width_SD_px','Width_Samples','Centroid_X_px','Centroid_Y_px','Pass1_Threshold','Pass2_Threshold','Detection_Status','Refinement_Status'];def keys=['image','areaPx','areaUm2','percentOpen','meanWidth','medianWidth','widthSD','widthSamples','centroidX','centroidY','threshold1','threshold2','detection','refinement'];List lines=[names.join(',')];rows.each{r->lines<<keys.collect{k->def v=r[k];v instanceof Number?(Double.isFinite(v as double)?d.format(v):'NA'):('"'+v.toString().replace('"','""')+'"')}.join(',')};Files.write(p,lines,StandardCharsets.UTF_8)}
+void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=['Image','Wound_Area_px2','Wound_Area_um2','Holes_Filled_px2','Percent_Open','Mean_Width_px','Median_Width_px','Width_SD_px','Width_Samples','Centroid_X_px','Centroid_Y_px','Pass1_Threshold','Pass2_Threshold','Detection_Status','Refinement_Status'];def keys=['image','areaPx','areaUm2','holesFilled','percentOpen','meanWidth','medianWidth','widthSD','widthSamples','centroidX','centroidY','threshold1','threshold2','detection','refinement'];List lines=[names.join(',')];rows.each{r->lines<<keys.collect{k->def v=r[k];v instanceof Number?(Double.isFinite(v as double)?d.format(v):'NA'):('"'+v.toString().replace('"','""')+'"')}.join(',')};Files.write(p,lines,StandardCharsets.UTF_8)}
 void writeSettings(Path p,String version,Map cfg,List order){List lines=["Scratch Assay Analyzer version=${version}","Generated=${ZonedDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX"))}"];cfg.each{k,v->lines<<"${k}=${v}"};lines<<'Images measured:';order.eachWithIndex{n,i->lines<<"${i+1}\t${n}"};Files.write(p,lines,StandardCharsets.UTF_8)}
 String safeStem(String n){n.replaceFirst(/\.[^.]+$/,'').replaceAll(/[^A-Za-z0-9._-]+/,'_')}
 int naturalCompare(String a,String b){def aa=a.toLowerCase().split(/(?<=\D)(?=\d)|(?<=\d)(?=\D)/),bb=b.toLowerCase().split(/(?<=\D)(?=\d)|(?<=\d)(?=\D)/);for(int i=0;i<Math.min(aa.length,bb.length);i++){int c=(aa[i]==~ /\d+/&&bb[i]==~ /\d+/)?new BigInteger(aa[i])<=>new BigInteger(bb[i]):aa[i]<=>bb[i];if(c)return c};aa.length<=>bb.length}
