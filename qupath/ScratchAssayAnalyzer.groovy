@@ -95,12 +95,19 @@ Map analyseImage(project, entry, Map cfg, Path maskDir, Path qcDir) {
     try {
         def server = imageData.getServer()
         double ds = cfg.downsample as double
-        int w = Math.max(1, (int)Math.ceil(server.getWidth() / ds))
-        int h = Math.max(1, (int)Math.ceil(server.getHeight() / ds))
-        checkMemoryBudget(entry.getImageName(), w, h, cfg)
+        checkMemoryBudget(entry.getImageName(),
+            Math.max(1, (int)Math.ceil(server.getWidth() / ds)),
+            Math.max(1, (int)Math.ceil(server.getHeight() / ds)), cfg)
 
         def request = RegionRequest.createInstance(server.getPath(), ds, 0, 0, server.getWidth(), server.getHeight())
         BufferedImage source = server.readRegion(request)
+        // Servers round region dimensions their own way at a downsample, so the
+        // image that comes back can differ from a computed estimate by a pixel.
+        // Take the analysis grid and the true scale from the returned image;
+        // assuming otherwise indexes past the end of the pixel arrays.
+        int w = source.getWidth(), h = source.getHeight()
+        double dsX = server.getWidth() / (double)w
+        double dsY = server.getHeight() / (double)h
         float[] gray = luminance(source)
 
         int marginX = Math.round(w * (100d - cfg.analysisPercent) / 200d) as int
@@ -125,7 +132,7 @@ Map analyseImage(project, entry, Map cfg, Path maskDir, Path qcDir) {
         }
         pass1 = morphology(pass1, w, h, cfg.closeIterations as int, cfg.openIterations as int)
 
-        Map selected = largestComponent(pass1, w, h, (cfg.minArea / (ds*ds)) as int)
+        Map selected = largestComponent(pass1, w, h, (cfg.minArea / (dsX*dsY)) as int)
         pass1 = null
         boolean[] firstMask = selected == null ? new boolean[w*h] : selected.mask
         // Cells and debris sitting in the gap read as high texture, so they
@@ -136,7 +143,7 @@ Map analyseImage(project, entry, Map cfg, Path maskDir, Path qcDir) {
         String refineStatus = cfg.secondPass ? 'NO_COMPONENT' : 'DISABLED'
 
         if (selected != null && cfg.secondPass) {
-            int band = Math.max(1, Math.round(cfg.refineBand / ds) as int)
+            int band = Math.max(1, Math.round(cfg.refineBand / dsX) as int)
             boolean[] inner = erode(firstMask, w, h, band)
             boolean[] outer = dilate(firstMask, w, h, band)
             boolean[] searchBand = new boolean[w*h]
@@ -163,11 +170,11 @@ Map analyseImage(project, entry, Map cfg, Path maskDir, Path qcDir) {
         field = null
 
         Map m = measurements(finalMask, w, h)
-        double areaPx = m.area * ds * ds
+        double areaPx = m.area * dsX * dsY
         def cal = server.getPixelCalibration()
         double pixelUm = cal.hasPixelSizeMicrons() ? cal.getAveragedPixelSizeMicrons() : Double.NaN
 
-        replaceGeneratedAnnotation(imageData, finalMask, w, h, ds)
+        replaceGeneratedAnnotation(imageData, finalMask, w, h, dsX, dsY)
         entry.saveImageData(imageData)
         String stem = safeStem(entry.getImageName())
         if (cfg.saveMasks)
@@ -177,10 +184,10 @@ Map analyseImage(project, entry, Map cfg, Path maskDir, Path qcDir) {
 
         return [image:entry.getImageName(), areaPx:areaPx,
                 areaUm2:Double.isNaN(pixelUm) ? Double.NaN : areaPx*pixelUm*pixelUm,
-                holesFilled:holesFilled*ds*ds,
+                holesFilled:holesFilled*dsX*dsY,
                 percentOpen:100d*m.area/Math.max(1L, fieldArea),
-                meanWidth:m.meanWidth*ds, medianWidth:m.medianWidth*ds, widthSD:m.widthSD*ds,
-                widthSamples:m.samples, centroidX:m.cx*ds, centroidY:m.cy*ds,
+                meanWidth:m.meanWidth*dsX, medianWidth:m.medianWidth*dsX, widthSD:m.widthSD*dsX,
+                widthSamples:m.samples, centroidX:m.cx*dsX, centroidY:m.cy*dsY,
                 threshold1:cut1, threshold2:cut2,
                 detection:selected == null ? 'NOT_FOUND' : 'FOUND', refinement:refineStatus]
     } finally {
@@ -344,6 +351,7 @@ float[] luminance(BufferedImage im) { int w=im.width,h=im.height; float[] a=new 
  * instead of the pair of double integral images an earlier version used.
  */
 float[] boxSum(float[] src,int w,int h,int r,boolean square) {
+    if(src.length<(long)w*h) throw new IllegalArgumentException("boxSum: an array of ${src.length} pixels cannot cover ${w}x${h}")
     float[] tmp=new float[src.length]
     for(int y=0;y<h;y++){int row=y*w;double run=0
         for(int x=0;x<Math.min(w,r+1);x++){double v=src[row+x];run+=square?v*v:v}
@@ -372,6 +380,7 @@ float[] localVariance(float[] a,int w,int h,int r) {
 
 /** Separable Gaussian blur. Writes the result back into src to save an array. */
 float[] gaussian(float[] src,int w,int h,double sigma) {
+    if(src.length<(long)w*h) throw new IllegalArgumentException("gaussian: an array of ${src.length} pixels cannot cover ${w}x${h}")
     if(sigma<=0)return src; int r=Math.max(1,(int)Math.ceil(3*sigma));double[] k=new double[2*r+1];double total=0
     for(int i=-r;i<=r;i++){k[i+r]=Math.exp(-i*i/(2*sigma*sigma));total+=k[i+r]};for(int i=0;i<k.length;i++)k[i]/=total
     float[] tmp=new float[src.length]
@@ -501,8 +510,8 @@ Map measurements(boolean[] m,int w,int h){long area=0,sx=0,sy=0;List widths=[];f
     widths.sort();double mean=widths.sum()/(double)widths.size(),med=widths.size()%2?widths[widths.size()/2]:(widths[widths.size()/2-1]+widths[widths.size()/2])/2d
     double sd=Math.sqrt(widths.collect{(it-mean)*(it-mean)}.sum()/widths.size());[area:area,cx:sx/(double)area,cy:sy/(double)area,meanWidth:mean,medianWidth:med,widthSD:sd,samples:widths.size()]}
 
-void replaceGeneratedAnnotation(imageData,boolean[] mask,int w,int h,double ds){def hierarchy=imageData.getHierarchy();def cls=PathClassFactory.getPathClass('Scratch wound');def old=hierarchy.getAnnotationObjects().findAll{it.getPathClass()==cls};if(!old.empty)hierarchy.removeObjects(old,true)
-    Area area=new Area();for(int y=0;y<h;y++){int start=-1;for(int x=0;x<=w;x++){boolean on=x<w&&mask[y*w+x];if(on&&start<0)start=x;if(!on&&start>=0){area.add(new Area(new Rectangle2D.Double(start*ds,y*ds,(x-start)*ds,ds)));start=-1}}}
+void replaceGeneratedAnnotation(imageData,boolean[] mask,int w,int h,double dsX,double dsY){def hierarchy=imageData.getHierarchy();def cls=PathClassFactory.getPathClass('Scratch wound');def old=hierarchy.getAnnotationObjects().findAll{it.getPathClass()==cls};if(!old.empty)hierarchy.removeObjects(old,true)
+    Area area=new Area();for(int y=0;y<h;y++){int start=-1;for(int x=0;x<=w;x++){boolean on=x<w&&mask[y*w+x];if(on&&start<0)start=x;if(!on&&start>=0){area.add(new Area(new Rectangle2D.Double(start*dsX,y*dsY,(x-start)*dsX,dsY)));start=-1}}}
     if(!area.isEmpty()){def roi=ROIs.createAreaROI(area,ImagePlane.getDefaultPlane());def obj=PathObjects.createAnnotationObject(roi,cls);obj.setName('Scratch wound (generated)');obj.getMeasurementList().put('Scratch assay generated',1d);hierarchy.addObject(obj)}}
 
 BufferedImage maskImage(boolean[] m,int w,int h){BufferedImage out=new BufferedImage(w,h,BufferedImage.TYPE_BYTE_GRAY);for(int y=0;y<h;y++)for(int x=0;x<w;x++)out.raster.setSample(x,y,0,m[y*w+x]?255:0);out}
