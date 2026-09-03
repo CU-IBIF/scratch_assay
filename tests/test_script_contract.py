@@ -47,6 +47,14 @@ assert "selectedIndices" in text
 assert "SelectionMode.MULTIPLE" in text
 assert "Images to measure" in text
 
+# The analysis grid must come from the image the server actually returned.
+# Servers round region dimensions their own way at a downsample, and a computed
+# estimate that is one pixel larger indexes past the end of the pixel arrays.
+assert "int w = source.getWidth(), h = source.getHeight()" in text
+assert "double dsX = server.getWidth() / (double)w" in text
+assert "double dsY = server.getHeight() / (double)h" in text
+assert text.count("cannot cover") == 2, "boxSum and gaussian should both guard the grid"
+
 # Images are measured independently: no tracking, baseline or elapsed time.
 for banned in ("selectComponent", "maxTrackShift", "frameInterval", "baselineArea",
                "Percent_Closure", "Tracking_Status", "Time_h"):
