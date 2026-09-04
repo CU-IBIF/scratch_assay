@@ -64,10 +64,13 @@ The output is written below the project directory:
 
 ```text
 Scratch_Assay_Results/
-  Scratch_Assay_Measurements.csv
+  Scratch_Assay_Measurements.csv     one row per image
   Scratch_Assay_Settings.txt
   Masks/
+    <image>_wound_mask.png
   QC/
+    <image>_QC.png
+    <image>_width_profile.csv        one row per measured line
 ```
 
 Areas and lengths are exported in both analysis pixels and calibrated units
@@ -110,6 +113,36 @@ of the image and rotating the mask back for the annotation and QC overlay.
 Area, `Percent_Open`, the centroid and the QC images are all reported in the
 original image frame either way.
 
+### Width profiles
+
+`Mean_Width_px` and friends summarise one measurement per scan line. The
+per-image `QC/<image>_width_profile.csv` writes those measurements out
+individually, so a reported width can be traced back to the pixels it came
+from - and drawn over the image to show where it was taken.
+
+| Column | Meaning |
+|---|---|
+| `Image`, `Orientation` | Repeated on every row so profiles concatenate cleanly |
+| `Line_Index` | Position of the scan line, in scan order |
+| `Start_X_px`, `Start_Y_px` | Where the line entered the wound, full resolution |
+| `End_X_px`, `End_Y_px` | Where it left |
+| `Width_px`, `Width_um` | The measured width; `Width_um` is `NA` when uncalibrated |
+| `Start_X_analysis_px` … `Width_analysis_px` | The same in analysis pixels |
+
+Full-resolution coordinates line up with the summary CSV and the QuPath
+annotation; the analysis-pixel columns line up with the QC and mask PNGs, so
+the lines can be drawn straight onto either. For a vertical scratch each row
+is one image row and the start/end points differ only in x; for a horizontal
+one it is the other way round.
+
+The mean of `Width_analysis_px` reproduces `Mean_Width_px` exactly - the
+profile is the summary's own input, not a recomputation. An image where no
+wound was found writes a header-only file.
+
+Turn this off with **Save width profile CSVs** if you do not want the extra
+files; it is independent of the QC overlays, which are the memory-hungry
+output.
+
 ### Fill holes
 
 Cells and debris that have settled in the gap are high-texture, so thresholding
@@ -143,6 +176,7 @@ what it changed.
 | Second pass | Reclassify a band around the first boundary with a finer texture map |
 | Save masks | Write a binary mask PNG per image |
 | Save QC overlays | Write a QC overlay PNG per image |
+| Save width profile CSVs | Write every measured line to `QC/<image>_width_profile.csv` |
 
 ### Using a trained QuPath pixel classifier
 

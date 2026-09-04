@@ -54,6 +54,13 @@ assert "boolean vertical = !isHorizontal(orientation)" in text
 # Length along the scratch and width across it are reported separately.
 assert "double lengthScale = vertical ? dsY : dsX" in text
 
+# Every width in the summary is traceable to the scan line that produced it.
+assert "writeWidthProfile" in text
+assert "_width_profile.csv" in text
+assert "lines<<[first,y,last,y]" in text and "lines<<[x,first,x,last]" in text
+# The profile lives in QC, so that folder must exist whenever either is written.
+assert "if (cfg.saveQC || cfg.saveProfiles) Files.createDirectories(qcDir)" in text
+
 # Width is measured across the scratch. Measuring the transposed axis is what
 # makes a horizontal scratch correct; it must not be reduced to one axis again.
 assert "Map measurements(boolean[] m,int w,int h,boolean vertical)" in text
