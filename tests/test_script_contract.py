@@ -44,9 +44,15 @@ assert "largestComponent" in text
 assert "fillHoles" in text
 # The image picker resolves by position, so duplicate image names stay distinct,
 # and each ticked image carries its own scratch orientation.
-assert "selection << [index:i, orientation:r.orient.value]" in text
+assert "selection << [index:i, orientation:isHorizontal(r.orient.value)" in text
 assert "Images to measure" in text
-assert "'Vertical', 'Horizontal'" in text
+assert "Vertical scratch (width measured left-right)" in text
+assert "Horizontal scratch (width measured top-bottom)" in text
+# One place decides what counts as horizontal.
+assert text.count("boolean isHorizontal(Object label)") == 1
+assert "boolean vertical = !isHorizontal(orientation)" in text
+# Length along the scratch and width across it are reported separately.
+assert "double lengthScale = vertical ? dsY : dsX" in text
 
 # Width is measured across the scratch. Measuring the transposed axis is what
 # makes a horizontal scratch correct; it must not be reduced to one axis again.
@@ -70,7 +76,7 @@ for banned in ("selectComponent", "maxTrackShift", "frameInterval", "baselineAre
 # Protect the stable CSV contract relied on by downstream analysis.
 header = re.search(r"List names=\[(.*?)\];def keys", text, re.S).group(1)
 for required in ("Image", "Orientation", "Wound_Area_px2", "Holes_Filled_px2",
-                 "Percent_Open", "Detection_Status"):
+                 "Percent_Open", "Scratch_Length_px", "Detection_Status"):
     assert f"'{required}'" in header
 # Image name is the key, so it must lead the row.
 assert header.startswith("'Image'")

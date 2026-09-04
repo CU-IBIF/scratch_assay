@@ -82,14 +82,24 @@ area and is worth inspecting in the QC overlay before use.
 `Holes_Filled_px2` reports how much of the wound area came from the fill-holes
 step, which is a useful sanity check: a large value means a lot of the gap was
 occupied by cells or debris. `Orientation` records what the image was measured
-as.
+as, and `Scratch_Length_px` the wound's extent along the scratch, so the width
+and length columns can always be told apart.
 
 ### Scratch orientation
 
-Width is always measured *across* the scratch: the horizontal run in each row
-for a vertical scratch, the vertical run in each column for a horizontal one.
-Getting this wrong does not fail loudly - it silently reports the scratch's
-length instead of its width - so set the dropdown to match each image.
+The dropdown describes **the scratch**, not the direction the width is
+measured in:
+
+- *Vertical scratch (width measured left-right)* - the gap runs top to bottom,
+  so its width is the horizontal run in each row.
+- *Horizontal scratch (width measured top-bottom)* - the gap runs left to
+  right, so its width is the vertical run in each column.
+
+`Scratch_Length_px` is reported next to the width columns, measured along the
+opposite axis. For a real scratch the length should be much larger than the
+width, and it should run the way the image looks. If `Scratch_Length_px` is the
+small number and `Mean_Width_px` is close to the image dimension, the dropdown
+is set the wrong way round for that image.
 
 Nothing else in the pipeline depends on orientation. The variance and Gaussian
 kernels are square, morphology uses square structuring elements, and component

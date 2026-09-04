@@ -98,7 +98,7 @@ Dialogs.showInfoNotification('Scratch Assay Analyzer', "Measured ${jobs.size()} 
  * map is the complete result for this entry.
  */
 Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path qcDir) {
-    boolean vertical = !'Horizontal'.equalsIgnoreCase(orientation)
+    boolean vertical = !isHorizontal(orientation)
     def imageData = entry.readImageData()
     try {
         def server = imageData.getServer()
@@ -179,9 +179,10 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
 
         Map m = measurements(finalMask, w, h, vertical)
         double areaPx = m.area * dsX * dsY
-        // Widths run across the scratch, so they scale with the axis they
-        // were measured along.
+        // Width runs across the scratch and length along it, so each scales
+        // with the axis it was measured on.
         double widthScale = vertical ? dsX : dsY
+        double lengthScale = vertical ? dsY : dsX
         def cal = server.getPixelCalibration()
         double pixelUm = cal.hasPixelSizeMicrons() ? cal.getAveragedPixelSizeMicrons() : Double.NaN
 
@@ -196,7 +197,7 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         return [image:entry.getImageName(), orientation:vertical ? 'Vertical' : 'Horizontal', areaPx:areaPx,
                 areaUm2:Double.isNaN(pixelUm) ? Double.NaN : areaPx*pixelUm*pixelUm,
                 holesFilled:holesFilled*dsX*dsY,
-                percentOpen:100d*m.area/Math.max(1L, fieldArea),
+                percentOpen:100d*m.area/Math.max(1L, fieldArea), length:m.length*lengthScale,
                 meanWidth:m.meanWidth*widthScale, medianWidth:m.medianWidth*widthScale, widthSD:m.widthSD*widthScale,
                 widthSamples:m.samples, centroidX:m.cx*dsX, centroidY:m.cy*dsY,
                 threshold1:cut1, threshold2:cut2,
@@ -247,9 +248,13 @@ Map buildSettingsDialog(project, List entries) {
     }
     // One row per project image: a tick to include it and its scratch
     // orientation. Positions match the caller's sorted entry list one for one.
+    // Spelled out, because "vertical" alone leaves it open whether it describes
+    // the scratch or the direction the width is measured in.
+    String vLabel = 'Vertical scratch (width measured left-right)'
+    String hLabel = 'Horizontal scratch (width measured top-bottom)'
     List picks = entries.collect { entry ->
         def tick = new CheckBox(entry.getImageName()); tick.selected = true
-        def orient = new ComboBox(); orient.items.addAll('Vertical', 'Horizontal'); orient.value = 'Vertical'
+        def orient = new ComboBox(); orient.items.addAll(vLabel, hLabel); orient.value = vLabel
         [tick:tick, orient:orient]
     }
     def pickGrid = new GridPane(hgap:12, vgap:3)
@@ -262,8 +267,8 @@ Map buildSettingsDialog(project, List entries) {
     }
     def toolbar = new HBox(6,
         bulk('All', { it.tick.selected = true }), bulk('None', { it.tick.selected = false }),
-        bulk('All vertical', { it.orient.value = 'Vertical' }),
-        bulk('All horizontal', { it.orient.value = 'Horizontal' }))
+        bulk('All vertical', { it.orient.value = vLabel }),
+        bulk('All horizontal', { it.orient.value = hLabel }))
     def pickScroll = new ScrollPane(pickGrid); pickScroll.fitToWidth = true; pickScroll.prefViewportHeight = 170
     def pickBox = new VBox(6, toolbar, pickScroll)
 
@@ -305,7 +310,8 @@ Map buildSettingsDialog(project, List entries) {
     try {
         Map f=result.get()
         List selection=[]
-        picks.eachWithIndex { r,i -> if (r.tick.selected) selection << [index:i, orientation:r.orient.value] }
+        picks.eachWithIndex { r,i -> if (r.tick.selected)
+            selection << [index:i, orientation:isHorizontal(r.orient.value) ? 'Horizontal' : 'Vertical'] }
         Map c=[selection:selection,
                inputMode:f.inputMode.value, classifierName:(f.classifierName.editor.text ?: f.classifierName.value ?: '').trim(),
                woundClass:f.woundClass.text.trim(), downsample:positive(f.downsample.text,'Downsample'), analysisPercent:positive(f.analysisPercent.text,'Analysis field'),
@@ -370,6 +376,9 @@ boolean[] classifierMask(project, imageData, String classifierName, String wound
         try { classificationServer.close() } catch (Exception ignored) {}
     }
 }
+
+/** Anything that does not announce itself as horizontal is treated as vertical. */
+boolean isHorizontal(Object label){ label != null && label.toString().toLowerCase().startsWith('horizontal') }
 
 double positive(String s,String n){ double v=Double.parseDouble(s); if(!(v>0))throw new IllegalArgumentException("$n must be > 0");v }
 double nonnegative(String s,String n){ double v=Double.parseDouble(s);if(v<0)throw new IllegalArgumentException("$n must be >= 0");v }
@@ -547,12 +556,17 @@ long fillHoles(boolean[] mask,int w,int h){
  * the segmentation depends on the orientation.
  */
 Map measurements(boolean[] m,int w,int h,boolean vertical){long area=0,sx=0,sy=0;List widths=[]
-    for(int y=0;y<h;y++)for(int x=0;x<w;x++)if(m[y*w+x]){area++;sx+=x;sy+=y}
+    int minX=w,maxX=-1,minY=h,maxY=-1
+    for(int y=0;y<h;y++)for(int x=0;x<w;x++)if(m[y*w+x]){area++;sx+=x;sy+=y
+        if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y}
     if(vertical){for(int y=0;y<h;y++){int first=-1,last=-1;for(int x=0;x<w;x++)if(m[y*w+x]){if(first<0)first=x;last=x};if(first>=0)widths<<last-first+1}}
     else{for(int x=0;x<w;x++){int first=-1,last=-1;for(int y=0;y<h;y++)if(m[y*w+x]){if(first<0)first=y;last=y};if(first>=0)widths<<last-first+1}}
-    if(area==0)return [area:0,cx:Double.NaN,cy:Double.NaN,meanWidth:Double.NaN,medianWidth:Double.NaN,widthSD:Double.NaN,samples:0]
+    if(area==0)return [area:0,cx:Double.NaN,cy:Double.NaN,length:Double.NaN,meanWidth:Double.NaN,medianWidth:Double.NaN,widthSD:Double.NaN,samples:0]
+    // Length runs along the scratch, width across it. Reporting both makes it
+    // obvious at a glance whether the orientation was set the right way round.
+    double length=vertical ? (maxY-minY+1) : (maxX-minX+1)
     widths.sort();double mean=widths.sum()/(double)widths.size(),med=widths.size()%2?widths[widths.size()/2]:(widths[widths.size()/2-1]+widths[widths.size()/2])/2d
-    double sd=Math.sqrt(widths.collect{(it-mean)*(it-mean)}.sum()/widths.size());[area:area,cx:sx/(double)area,cy:sy/(double)area,meanWidth:mean,medianWidth:med,widthSD:sd,samples:widths.size()]}
+    double sd=Math.sqrt(widths.collect{(it-mean)*(it-mean)}.sum()/widths.size());[area:area,cx:sx/(double)area,cy:sy/(double)area,length:length,meanWidth:mean,medianWidth:med,widthSD:sd,samples:widths.size()]}
 
 void replaceGeneratedAnnotation(imageData,boolean[] mask,int w,int h,double dsX,double dsY){def hierarchy=imageData.getHierarchy();def cls=PathClassFactory.getPathClass('Scratch wound');def old=hierarchy.getAnnotationObjects().findAll{it.getPathClass()==cls};if(!old.empty)hierarchy.removeObjects(old,true)
     Area area=new Area();for(int y=0;y<h;y++){int start=-1;for(int x=0;x<=w;x++){boolean on=x<w&&mask[y*w+x];if(on&&start<0)start=x;if(!on&&start>=0){area.add(new Area(new Rectangle2D.Double(start*dsX,y*dsY,(x-start)*dsX,dsY)));start=-1}}}
@@ -562,7 +576,7 @@ BufferedImage maskImage(boolean[] m,int w,int h){BufferedImage out=new BufferedI
 BufferedImage qcImage(BufferedImage source,boolean[] p1,boolean[] fin,int mx,int my){int w=source.width,h=source.height;BufferedImage out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB);Graphics2D g=out.createGraphics();g.drawImage(source,0,0,null);g.dispose();for(int y=1;y<h-1;y++)for(int x=1;x<w-1;x++){int i=y*w+x;if(boundary(p1,i,w)&&!boundary(fin,i,w))out.setRGB(x,y,0xFFFF00);if(boundary(fin,i,w))out.setRGB(x,y,0xFF0000)};for(int x=mx;x<w-mx;x++){out.setRGB(x,my,0x00FFFF);out.setRGB(x,h-my-1,0x00FFFF)};for(int y=my;y<h-my;y++){out.setRGB(mx,y,0x00FFFF);out.setRGB(w-mx-1,y,0x00FFFF)};out}
 boolean boundary(boolean[] m,int i,int w){m[i]&&(!m[i-1]||!m[i+1]||!m[i-w]||!m[i+w])}
 
-void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=['Image','Orientation','Wound_Area_px2','Wound_Area_um2','Holes_Filled_px2','Percent_Open','Mean_Width_px','Median_Width_px','Width_SD_px','Width_Samples','Centroid_X_px','Centroid_Y_px','Pass1_Threshold','Pass2_Threshold','Detection_Status','Refinement_Status'];def keys=['image','orientation','areaPx','areaUm2','holesFilled','percentOpen','meanWidth','medianWidth','widthSD','widthSamples','centroidX','centroidY','threshold1','threshold2','detection','refinement'];List lines=[names.join(',')];rows.each{r->lines<<keys.collect{k->def v=r[k];v instanceof Number?(Double.isFinite(v as double)?d.format(v):'NA'):('"'+v.toString().replace('"','""')+'"')}.join(',')};Files.write(p,lines,StandardCharsets.UTF_8)}
+void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=['Image','Orientation','Wound_Area_px2','Wound_Area_um2','Holes_Filled_px2','Percent_Open','Scratch_Length_px','Mean_Width_px','Median_Width_px','Width_SD_px','Width_Samples','Centroid_X_px','Centroid_Y_px','Pass1_Threshold','Pass2_Threshold','Detection_Status','Refinement_Status'];def keys=['image','orientation','areaPx','areaUm2','holesFilled','percentOpen','length','meanWidth','medianWidth','widthSD','widthSamples','centroidX','centroidY','threshold1','threshold2','detection','refinement'];List lines=[names.join(',')];rows.each{r->lines<<keys.collect{k->def v=r[k];v instanceof Number?(Double.isFinite(v as double)?d.format(v):'NA'):('"'+v.toString().replace('"','""')+'"')}.join(',')};Files.write(p,lines,StandardCharsets.UTF_8)}
 void writeSettings(Path p,String version,Map cfg,List order){List lines=["Scratch Assay Analyzer version=${version}","Generated=${ZonedDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX"))}"];cfg.each{k,v->lines<<"${k}=${v}"};lines<<'Images measured:';order.eachWithIndex{n,i->lines<<"${i+1}\t${n}"};Files.write(p,lines,StandardCharsets.UTF_8)}
 String safeStem(String n){n.replaceFirst(/\.[^.]+$/,'').replaceAll(/[^A-Za-z0-9._-]+/,'_')}
 int naturalCompare(String a,String b){def aa=a.toLowerCase().split(/(?<=\D)(?=\d)|(?<=\d)(?=\D)/),bb=b.toLowerCase().split(/(?<=\D)(?=\d)|(?<=\d)(?=\D)/);for(int i=0;i<Math.min(aa.length,bb.length);i++){int c=(aa[i]==~ /\d+/&&bb[i]==~ /\d+/)?new BigInteger(aa[i])<=>new BigInteger(bb[i]):aa[i]<=>bb[i];if(c)return c};aa.length<=>bb.length}
