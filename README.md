@@ -35,11 +35,14 @@ make results easier to compare. CSV rows are written in natural filename order
 (`t2` precedes `t10`) purely so the output is readable and reproducible; no
 measurement depends on where an image falls in that order.
 
-You do not have to measure the whole project. The settings dialog opens with an
-**Images to measure** list; tick any subset (ctrl-click or shift-click for
-several) and only those are processed. Leave it untouched to measure
-everything. Selection is by position in the list, so a project containing two
-entries with the same image name still resolves to the one you ticked.
+You do not have to measure the whole project. The settings dialog opens with a
+row per image: a tick to include it, and a dropdown for that image's scratch
+orientation. Everything starts ticked and set to **Vertical**. The **All**,
+**None**, **All vertical** and **All horizontal** buttons set every row at
+once, so a project that is mostly one orientation takes two clicks. Selection
+is by position in the list, so a project containing two entries with the same
+image name still resolves to the one you ticked, each with its own
+orientation.
 
 ## Workflow
 
@@ -78,7 +81,24 @@ same image, so it is comparable across images without a baseline frame.
 area and is worth inspecting in the QC overlay before use.
 `Holes_Filled_px2` reports how much of the wound area came from the fill-holes
 step, which is a useful sanity check: a large value means a lot of the gap was
-occupied by cells or debris.
+occupied by cells or debris. `Orientation` records what the image was measured
+as.
+
+### Scratch orientation
+
+Width is always measured *across* the scratch: the horizontal run in each row
+for a vertical scratch, the vertical run in each column for a horizontal one.
+Getting this wrong does not fail loudly - it silently reports the scratch's
+length instead of its width - so set the dropdown to match each image.
+
+Nothing else in the pipeline depends on orientation. The variance and Gaussian
+kernels are square, morphology uses square structuring elements, and component
+labelling and hole filling are 4-connected, all of which are unchanged by a
+quarter turn. Measuring the transposed axis is therefore exactly equivalent to
+rotating the image and measuring rows, and it avoids allocating a second copy
+of the image and rotating the mask back for the annotation and QC overlay.
+Area, `Percent_Open`, the centroid and the QC images are all reported in the
+original image frame either way.
 
 ### Fill holes
 
@@ -98,7 +118,8 @@ what it changed.
 
 | Setting | Meaning |
 |---|---|
-| Images to measure | Subset of project images to process; none selected means all |
+| Images to measure | Tick the images to process; all are ticked by default |
+| Scratch orientation | Per image: is the scratch vertical or horizontal? |
 | Starting mask | Use the original variance threshold or a saved pixel classifier |
 | Saved pixel classifier | Project classifier evaluated for every image |
 | Classifier wound class | Exact classifier output class to treat as wound (case-insensitive) |

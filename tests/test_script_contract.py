@@ -42,10 +42,17 @@ assert "largestComponent" in text
 # Debris inside the gap punches holes in the wound; closing them is what makes
 # the reported area the true open area.
 assert "fillHoles" in text
-# The image picker resolves by position, so duplicate image names stay distinct.
-assert "selectedIndices" in text
-assert "SelectionMode.MULTIPLE" in text
+# The image picker resolves by position, so duplicate image names stay distinct,
+# and each ticked image carries its own scratch orientation.
+assert "selection << [index:i, orientation:r.orient.value]" in text
 assert "Images to measure" in text
+assert "'Vertical', 'Horizontal'" in text
+
+# Width is measured across the scratch. Measuring the transposed axis is what
+# makes a horizontal scratch correct; it must not be reduced to one axis again.
+assert "Map measurements(boolean[] m,int w,int h,boolean vertical)" in text
+assert "double widthScale = vertical ? dsX : dsY" in text
+assert "measurements(finalMask, w, h, vertical)" in text
 
 # The analysis grid must come from the image the server actually returned.
 # Servers round region dimensions their own way at a downsample, and a computed
@@ -62,7 +69,8 @@ for banned in ("selectComponent", "maxTrackShift", "frameInterval", "baselineAre
 
 # Protect the stable CSV contract relied on by downstream analysis.
 header = re.search(r"List names=\[(.*?)\];def keys", text, re.S).group(1)
-for required in ("Image", "Wound_Area_px2", "Holes_Filled_px2", "Percent_Open", "Detection_Status"):
+for required in ("Image", "Orientation", "Wound_Area_px2", "Holes_Filled_px2",
+                 "Percent_Open", "Detection_Status"):
     assert f"'{required}'" in header
 # Image name is the key, so it must lead the row.
 assert header.startswith("'Image'")
