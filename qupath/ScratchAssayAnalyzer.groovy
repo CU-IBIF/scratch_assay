@@ -14,7 +14,10 @@
 import javafx.application.Platform
 import javafx.geometry.Insets
 import javafx.scene.control.*
+import javafx.event.EventHandler
 import javafx.scene.layout.GridPane
+import javafx.scene.layout.HBox
+import javafx.scene.layout.VBox
 import javafx.stage.Modality
 import qupath.lib.gui.dialogs.Dialogs
 import qupath.lib.objects.PathObjects
@@ -60,9 +63,11 @@ if (cfg == null) return
 
 // The picker returns positions rather than names, so a project holding two
 // entries with the same image name still resolves to the one that was ticked.
-List picked = cfg.remove('selectedIndices') as List
-if (picked) entries = picked.collect { entries[it as int] }
-if (entries.isEmpty()) {
+// Each job carries its own scratch orientation.
+List jobs = (cfg.remove('selection') as List).collect {
+    [entry: entries[it.index as int], orientation: it.orientation as String]
+}
+if (jobs.isEmpty()) {
     Dialogs.showErrorMessage('Scratch Assay Analyzer', 'No images were selected.')
     return
 }
@@ -75,22 +80,25 @@ if (cfg.saveQC) Files.createDirectories(qcDir)
 if (cfg.saveMasks) Files.createDirectories(maskDir)
 
 List rows = []
-entries.eachWithIndex { entry, i ->
+jobs.eachWithIndex { job, i ->
     // Each image is analysed in its own method call so that every large array
     // it allocates becomes unreachable as soon as the call returns.
-    rows << analyseImage(project, entry, cfg, maskDir, qcDir)
-    println "Scratch assay ${i+1}/${entries.size()}: ${entry.getImageName()} (${rows[-1].areaPx} px2)"
+    rows << analyseImage(project, job.entry, job.orientation as String, cfg, maskDir, qcDir)
+    println "Scratch assay ${i+1}/${jobs.size()}: ${job.entry.getImageName()} " +
+            "[${rows[-1].orientation}] (${rows[-1].areaPx} px2)"
 }
 
 writeCsv(output.resolve('Scratch_Assay_Measurements.csv'), rows)
-writeSettings(output.resolve('Scratch_Assay_Settings.txt'), VERSION, cfg, entries*.getImageName())
-Dialogs.showInfoNotification('Scratch Assay Analyzer', "Measured ${entries.size()} image(s). Results: ${output}")
+writeSettings(output.resolve('Scratch_Assay_Settings.txt'), VERSION, cfg,
+    jobs.collect { "${it.entry.getImageName()}\t${it.orientation}" })
+Dialogs.showInfoNotification('Scratch Assay Analyzer', "Measured ${jobs.size()} image(s). Results: ${output}")
 
 /**
  * Measure a single image. Nothing carries over between images: the returned
  * map is the complete result for this entry.
  */
-Map analyseImage(project, entry, Map cfg, Path maskDir, Path qcDir) {
+Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path qcDir) {
+    boolean vertical = !'Horizontal'.equalsIgnoreCase(orientation)
     def imageData = entry.readImageData()
     try {
         def server = imageData.getServer()
@@ -169,8 +177,11 @@ Map analyseImage(project, entry, Map cfg, Path maskDir, Path qcDir) {
         gray = null
         field = null
 
-        Map m = measurements(finalMask, w, h)
+        Map m = measurements(finalMask, w, h, vertical)
         double areaPx = m.area * dsX * dsY
+        // Widths run across the scratch, so they scale with the axis they
+        // were measured along.
+        double widthScale = vertical ? dsX : dsY
         def cal = server.getPixelCalibration()
         double pixelUm = cal.hasPixelSizeMicrons() ? cal.getAveragedPixelSizeMicrons() : Double.NaN
 
@@ -182,11 +193,11 @@ Map analyseImage(project, entry, Map cfg, Path maskDir, Path qcDir) {
         if (cfg.saveQC)
             ImageIO.write(qcImage(source, firstMask, finalMask, marginX, marginY), 'PNG', qcDir.resolve(stem+'_QC.png').toFile())
 
-        return [image:entry.getImageName(), areaPx:areaPx,
+        return [image:entry.getImageName(), orientation:vertical ? 'Vertical' : 'Horizontal', areaPx:areaPx,
                 areaUm2:Double.isNaN(pixelUm) ? Double.NaN : areaPx*pixelUm*pixelUm,
                 holesFilled:holesFilled*dsX*dsY,
                 percentOpen:100d*m.area/Math.max(1L, fieldArea),
-                meanWidth:m.meanWidth*dsX, medianWidth:m.medianWidth*dsX, widthSD:m.widthSD*dsX,
+                meanWidth:m.meanWidth*widthScale, medianWidth:m.medianWidth*widthScale, widthSD:m.widthSD*widthScale,
                 widthSamples:m.samples, centroidX:m.cx*dsX, centroidY:m.cy*dsY,
                 threshold1:cut1, threshold2:cut2,
                 detection:selected == null ? 'NOT_FOUND' : 'FOUND', refinement:refineStatus]
@@ -234,8 +245,30 @@ Map buildSettingsDialog(project, List entries) {
     } catch (Exception ignored) {
         classifierNames = []
     }
+    // One row per project image: a tick to include it and its scratch
+    // orientation. Positions match the caller's sorted entry list one for one.
+    List picks = entries.collect { entry ->
+        def tick = new CheckBox(entry.getImageName()); tick.selected = true
+        def orient = new ComboBox(); orient.items.addAll('Vertical', 'Horizontal'); orient.value = 'Vertical'
+        [tick:tick, orient:orient]
+    }
+    def pickGrid = new GridPane(hgap:12, vgap:3)
+    picks.eachWithIndex { r, i -> pickGrid.add(r.tick, 0, i); pickGrid.add(r.orient, 1, i) }
+    // Setting twenty dropdowns by hand is worse than the problem being solved.
+    def bulk = { String label, Closure action ->
+        def b = new Button(label)
+        b.setOnAction({ e -> picks.each(action) } as EventHandler)
+        b
+    }
+    def toolbar = new HBox(6,
+        bulk('All', { it.tick.selected = true }), bulk('None', { it.tick.selected = false }),
+        bulk('All vertical', { it.orient.value = 'Vertical' }),
+        bulk('All horizontal', { it.orient.value = 'Horizontal' }))
+    def pickScroll = new ScrollPane(pickGrid); pickScroll.fitToWidth = true; pickScroll.prefViewportHeight = 170
+    def pickBox = new VBox(6, toolbar, pickScroll)
+
     def fields = [
-        images:new ListView<String>(), inputMode:new ComboBox(), classifierName:new ComboBox(),
+        inputMode:new ComboBox(), classifierName:new ComboBox(),
         woundClass:new TextField('Wound'),
         downsample:new TextField('4'), analysisPercent:new TextField('90'), varianceRadius:new TextField('5'),
         smoothSigma:new TextField('2'), minArea:new TextField('5000'), closeIterations:new TextField('2'),
@@ -245,10 +278,6 @@ Map buildSettingsDialog(project, List entries) {
         refineCloseIterations:new TextField('1'), refineOpenIterations:new TextField('0'),
         saveMasks:new CheckBox(), saveQC:new CheckBox()
     ]
-    // Positions in this list match the caller's sorted entry list one for one.
-    fields.images.items.addAll(entries*.getImageName())
-    fields.images.selectionModel.selectionMode=SelectionMode.MULTIPLE
-    fields.images.prefHeight=140
     fields.inputMode.items.addAll('Variance threshold', 'Pixel classifier')
     fields.inputMode.value='Variance threshold'
     fields.classifierName.items.addAll(classifierNames)
@@ -256,15 +285,16 @@ Map buildSettingsDialog(project, List entries) {
     if (!classifierNames.empty) fields.classifierName.value=classifierNames[0]
     fields.fillHoles.selected=true
     fields.secondPass.selected=true; fields.saveMasks.selected=true; fields.saveQC.selected=true
-    def labels=["Images to measure (none = all ${entries.size()})",
-                'Starting mask','Saved pixel classifier','Classifier wound class','Downsample','Analysis field (%)',
+    def labels=['Starting mask','Saved pixel classifier','Classifier wound class','Downsample','Analysis field (%)',
                 'Variance radius (analysis px)','Texture smoothing sigma',
                 'Minimum wound area (full-res px²)','Close iterations','Open iterations',
                 'Fill holes in wound','Enable second pass',
                 'Refinement band (full-res px)','Refinement variance radius','Refinement smoothing sigma',
                 'Refinement close iterations','Refinement open iterations','Save masks','Save QC overlays']
     def grid=new GridPane(hgap:10,vgap:7,padding:new Insets(12))
-    fields.values().eachWithIndex { node,i -> grid.add(new Label(labels[i]),0,i); grid.add(node,1,i) }
+    grid.add(new Label("Images to measure (${entries.size()}) and scratch orientation"),0,0)
+    grid.add(pickBox,1,0)
+    fields.values().eachWithIndex { node,i -> grid.add(new Label(labels[i]),0,i+1); grid.add(node,1,i+1) }
     def dialog=new Dialog<Map>(); dialog.title='Scratch Assay Analyzer'; dialog.initModality(Modality.APPLICATION_MODAL)
     // The picker makes the form tall enough to overflow a small screen.
     def scroll=new ScrollPane(grid); scroll.fitToWidth=true; scroll.prefViewportHeight=600
@@ -274,7 +304,9 @@ Map buildSettingsDialog(project, List entries) {
     def result=dialog.showAndWait(); if (!result.isPresent()) return null
     try {
         Map f=result.get()
-        Map c=[selectedIndices:new ArrayList(f.images.selectionModel.selectedIndices),
+        List selection=[]
+        picks.eachWithIndex { r,i -> if (r.tick.selected) selection << [index:i, orientation:r.orient.value] }
+        Map c=[selection:selection,
                inputMode:f.inputMode.value, classifierName:(f.classifierName.editor.text ?: f.classifierName.value ?: '').trim(),
                woundClass:f.woundClass.text.trim(), downsample:positive(f.downsample.text,'Downsample'), analysisPercent:positive(f.analysisPercent.text,'Analysis field'),
                varianceRadius:nonnegativeInt(f.varianceRadius.text,'Variance radius'), smoothSigma:nonnegative(f.smoothSigma.text,'Smoothing'),
@@ -505,7 +537,19 @@ long fillHoles(boolean[] mask,int w,int h){
     filled
 }
 
-Map measurements(boolean[] m,int w,int h){long area=0,sx=0,sy=0;List widths=[];for(int y=0;y<h;y++){int first=-1,last=-1;for(int x=0;x<w;x++)if(m[y*w+x]){area++;sx+=x;sy+=y;if(first<0)first=x;last=x};if(first>=0)widths<<last-first+1}
+/**
+ * Area, centroid and width statistics for a mask. Width is always measured
+ * across the scratch: the horizontal run in each row for a vertical scratch,
+ * the vertical run in each column for a horizontal one. Measuring the
+ * transposed axis is exactly equivalent to rotating the image a quarter turn
+ * and measuring rows, but needs no second copy of the image. Every other step
+ * in the pipeline uses square kernels and 4-connectivity, so nothing else in
+ * the segmentation depends on the orientation.
+ */
+Map measurements(boolean[] m,int w,int h,boolean vertical){long area=0,sx=0,sy=0;List widths=[]
+    for(int y=0;y<h;y++)for(int x=0;x<w;x++)if(m[y*w+x]){area++;sx+=x;sy+=y}
+    if(vertical){for(int y=0;y<h;y++){int first=-1,last=-1;for(int x=0;x<w;x++)if(m[y*w+x]){if(first<0)first=x;last=x};if(first>=0)widths<<last-first+1}}
+    else{for(int x=0;x<w;x++){int first=-1,last=-1;for(int y=0;y<h;y++)if(m[y*w+x]){if(first<0)first=y;last=y};if(first>=0)widths<<last-first+1}}
     if(area==0)return [area:0,cx:Double.NaN,cy:Double.NaN,meanWidth:Double.NaN,medianWidth:Double.NaN,widthSD:Double.NaN,samples:0]
     widths.sort();double mean=widths.sum()/(double)widths.size(),med=widths.size()%2?widths[widths.size()/2]:(widths[widths.size()/2-1]+widths[widths.size()/2])/2d
     double sd=Math.sqrt(widths.collect{(it-mean)*(it-mean)}.sum()/widths.size());[area:area,cx:sx/(double)area,cy:sy/(double)area,meanWidth:mean,medianWidth:med,widthSD:sd,samples:widths.size()]}
@@ -518,7 +562,7 @@ BufferedImage maskImage(boolean[] m,int w,int h){BufferedImage out=new BufferedI
 BufferedImage qcImage(BufferedImage source,boolean[] p1,boolean[] fin,int mx,int my){int w=source.width,h=source.height;BufferedImage out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB);Graphics2D g=out.createGraphics();g.drawImage(source,0,0,null);g.dispose();for(int y=1;y<h-1;y++)for(int x=1;x<w-1;x++){int i=y*w+x;if(boundary(p1,i,w)&&!boundary(fin,i,w))out.setRGB(x,y,0xFFFF00);if(boundary(fin,i,w))out.setRGB(x,y,0xFF0000)};for(int x=mx;x<w-mx;x++){out.setRGB(x,my,0x00FFFF);out.setRGB(x,h-my-1,0x00FFFF)};for(int y=my;y<h-my;y++){out.setRGB(mx,y,0x00FFFF);out.setRGB(w-mx-1,y,0x00FFFF)};out}
 boolean boundary(boolean[] m,int i,int w){m[i]&&(!m[i-1]||!m[i+1]||!m[i-w]||!m[i+w])}
 
-void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=['Image','Wound_Area_px2','Wound_Area_um2','Holes_Filled_px2','Percent_Open','Mean_Width_px','Median_Width_px','Width_SD_px','Width_Samples','Centroid_X_px','Centroid_Y_px','Pass1_Threshold','Pass2_Threshold','Detection_Status','Refinement_Status'];def keys=['image','areaPx','areaUm2','holesFilled','percentOpen','meanWidth','medianWidth','widthSD','widthSamples','centroidX','centroidY','threshold1','threshold2','detection','refinement'];List lines=[names.join(',')];rows.each{r->lines<<keys.collect{k->def v=r[k];v instanceof Number?(Double.isFinite(v as double)?d.format(v):'NA'):('"'+v.toString().replace('"','""')+'"')}.join(',')};Files.write(p,lines,StandardCharsets.UTF_8)}
+void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=['Image','Orientation','Wound_Area_px2','Wound_Area_um2','Holes_Filled_px2','Percent_Open','Mean_Width_px','Median_Width_px','Width_SD_px','Width_Samples','Centroid_X_px','Centroid_Y_px','Pass1_Threshold','Pass2_Threshold','Detection_Status','Refinement_Status'];def keys=['image','orientation','areaPx','areaUm2','holesFilled','percentOpen','meanWidth','medianWidth','widthSD','widthSamples','centroidX','centroidY','threshold1','threshold2','detection','refinement'];List lines=[names.join(',')];rows.each{r->lines<<keys.collect{k->def v=r[k];v instanceof Number?(Double.isFinite(v as double)?d.format(v):'NA'):('"'+v.toString().replace('"','""')+'"')}.join(',')};Files.write(p,lines,StandardCharsets.UTF_8)}
 void writeSettings(Path p,String version,Map cfg,List order){List lines=["Scratch Assay Analyzer version=${version}","Generated=${ZonedDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX"))}"];cfg.each{k,v->lines<<"${k}=${v}"};lines<<'Images measured:';order.eachWithIndex{n,i->lines<<"${i+1}\t${n}"};Files.write(p,lines,StandardCharsets.UTF_8)}
 String safeStem(String n){n.replaceFirst(/\.[^.]+$/,'').replaceAll(/[^A-Za-z0-9._-]+/,'_')}
 int naturalCompare(String a,String b){def aa=a.toLowerCase().split(/(?<=\D)(?=\d)|(?<=\d)(?=\D)/),bb=b.toLowerCase().split(/(?<=\D)(?=\d)|(?<=\d)(?=\D)/);for(int i=0;i<Math.min(aa.length,bb.length);i++){int c=(aa[i]==~ /\d+/&&bb[i]==~ /\d+/)?new BigInteger(aa[i])<=>new BigInteger(bb[i]):aa[i]<=>bb[i];if(c)return c};aa.length<=>bb.length}
