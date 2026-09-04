@@ -60,6 +60,10 @@ assert "_width_profile.csv" in text
 assert "lines<<[first,y,last,y]" in text and "lines<<[x,first,x,last]" in text
 # The profile lives in QC, so that folder must exist whenever either is written.
 assert "if (cfg.saveQC || cfg.saveProfiles) Files.createDirectories(qcDir)" in text
+# Stride thins the profile file only: the summary is always over every line.
+assert "profileStride" in text
+assert "if (i % stride != 0) return" in text
+assert "positiveInt(f.profileStride.text" in text
 
 # Width is measured across the scratch. Measuring the transposed axis is what
 # makes a horizontal scratch correct; it must not be reduced to one axis again.

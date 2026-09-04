@@ -135,13 +135,20 @@ the lines can be drawn straight onto either. For a vertical scratch each row
 is one image row and the start/end points differ only in x; for a horizontal
 one it is the other way round.
 
-The mean of `Width_analysis_px` reproduces `Mean_Width_px` exactly - the
-profile is the summary's own input, not a recomputation. An image where no
-wound was found writes a header-only file.
+At the default stride of 1 the mean of `Width_analysis_px` reproduces
+`Mean_Width_px` exactly - the profile is the summary's own input, not a
+recomputation. An image where no wound was found writes a header-only file.
 
-Turn this off with **Save width profile CSVs** if you do not want the extra
-files; it is independent of the QC overlays, which are the memory-hungry
-output.
+A vertical scratch in a 2400-pixel-tall image gives 2400 rows. **Width profile
+stride** writes every Nth line instead: a stride of 10 keeps a tenth of them.
+`Line_Index` still records each line's true position, so a thinned profile
+plots in the right place. The stride thins the file *only* - `Mean_Width_px`,
+the median and the SD are always computed over every line, so changing it never
+changes a measurement. At a stride above 1 the profile is a sample of the
+summary rather than a reproduction of it.
+
+Turn the file off entirely with **Save width profile CSVs**; it is independent
+of the QC overlays, which are the memory-hungry output.
 
 ### Fill holes
 
@@ -176,7 +183,8 @@ what it changed.
 | Second pass | Reclassify a band around the first boundary with a finer texture map |
 | Save masks | Write a binary mask PNG per image |
 | Save QC overlays | Write a QC overlay PNG per image |
-| Save width profile CSVs | Write every measured line to `QC/<image>_width_profile.csv` |
+| Save width profile CSVs | Write the measured lines to `QC/<image>_width_profile.csv` |
+| Width profile stride | Write every Nth line to that file; does not affect any measurement |
 
 ### Using a trained QuPath pixel classifier
 

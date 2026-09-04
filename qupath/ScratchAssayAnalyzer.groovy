@@ -195,7 +195,8 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
             ImageIO.write(qcImage(source, firstMask, finalMask, marginX, marginY), 'PNG', qcDir.resolve(stem+'_QC.png').toFile())
         if (cfg.saveProfiles)
             writeWidthProfile(qcDir.resolve(stem+'_width_profile.csv'), entry.getImageName(),
-                vertical ? 'Vertical' : 'Horizontal', m.lines as List, dsX, dsY, widthScale, pixelUm)
+                vertical ? 'Vertical' : 'Horizontal', m.lines as List, dsX, dsY, widthScale, pixelUm,
+                cfg.profileStride as int)
 
         return [image:entry.getImageName(), orientation:vertical ? 'Vertical' : 'Horizontal', areaPx:areaPx,
                 areaUm2:Double.isNaN(pixelUm) ? Double.NaN : areaPx*pixelUm*pixelUm,
@@ -284,7 +285,8 @@ Map buildSettingsDialog(project, List entries) {
         refineBand:new TextField('20'),
         refineVarianceRadius:new TextField('3'), refineSmoothSigma:new TextField('1'),
         refineCloseIterations:new TextField('1'), refineOpenIterations:new TextField('0'),
-        saveMasks:new CheckBox(), saveQC:new CheckBox(), saveProfiles:new CheckBox()
+        saveMasks:new CheckBox(), saveQC:new CheckBox(), saveProfiles:new CheckBox(),
+        profileStride:new TextField('1')
     ]
     fields.inputMode.items.addAll('Variance threshold', 'Pixel classifier')
     fields.inputMode.value='Variance threshold'
@@ -300,7 +302,7 @@ Map buildSettingsDialog(project, List entries) {
                 'Fill holes in wound','Enable second pass',
                 'Refinement band (full-res px)','Refinement variance radius','Refinement smoothing sigma',
                 'Refinement close iterations','Refinement open iterations','Save masks','Save QC overlays',
-                'Save width profile CSVs']
+                'Save width profile CSVs','Width profile stride (every Nth line)']
     def grid=new GridPane(hgap:10,vgap:7,padding:new Insets(12))
     grid.add(new Label("Images to measure (${entries.size()}) and scratch orientation"),0,0)
     grid.add(pickBox,1,0)
@@ -329,7 +331,8 @@ Map buildSettingsDialog(project, List entries) {
                refineCloseIterations:nonnegativeInt(f.refineCloseIterations.text,'Refinement close'),
                refineOpenIterations:nonnegativeInt(f.refineOpenIterations.text,'Refinement open'),
                saveMasks:f.saveMasks.selected, saveQC:f.saveQC.selected,
-               saveProfiles:f.saveProfiles.selected]
+               saveProfiles:f.saveProfiles.selected,
+               profileStride:positiveInt(f.profileStride.text,'Profile stride')]
         if (c.analysisPercent > 100) throw new IllegalArgumentException('Analysis field must not exceed 100')
         if (c.inputMode == 'Pixel classifier' && !c.classifierName)
             throw new IllegalArgumentException('Choose or enter a saved pixel classifier')
@@ -388,6 +391,7 @@ boolean isHorizontal(Object label){ label != null && label.toString().toLowerCas
 
 double positive(String s,String n){ double v=Double.parseDouble(s); if(!(v>0))throw new IllegalArgumentException("$n must be > 0");v }
 double nonnegative(String s,String n){ double v=Double.parseDouble(s);if(v<0)throw new IllegalArgumentException("$n must be >= 0");v }
+int positiveInt(String s,String n){ int v=nonnegativeInt(s,n);if(v<1)throw new IllegalArgumentException("$n must be at least 1");v }
 int nonnegativeInt(String s,String n){ double v=nonnegative(s,n);if(v!=Math.rint(v))throw new IllegalArgumentException("$n must be an integer");v as int }
 
 float[] luminance(BufferedImage im) { int w=im.width,h=im.height; float[] a=new float[w*h]; for(int y=0;y<h;y++)for(int x=0;x<w;x++){int c=im.getRGB(x,y);a[y*w+x]=(float)(0.2126*((c>>16)&255)+0.7152*((c>>8)&255)+0.0722*(c&255))};a }
@@ -595,13 +599,18 @@ void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=[
  * friends, so a measurement can be drawn back over the image that produced it.
  * Coordinates are given both full resolution, matching the summary CSV and the
  * QuPath annotation, and in analysis pixels, matching the QC and mask PNGs.
+ * A stride above 1 thins this file only; the summary statistics are always
+ * computed over every line.
  */
-void writeWidthProfile(Path p,String image,String orientation,List lines,double dsX,double dsY,double widthScale,double pixelUm){
+void writeWidthProfile(Path p,String image,String orientation,List lines,double dsX,double dsY,double widthScale,double pixelUm,int stride){
     def d=new DecimalFormat('0.######')
     List out=['Image,Orientation,Line_Index,Start_X_px,Start_Y_px,End_X_px,End_Y_px,Width_px,Width_um,' +
               'Start_X_analysis_px,Start_Y_analysis_px,End_X_analysis_px,End_Y_analysis_px,Width_analysis_px']
     String img='"'+image.replace('"','""')+'"',ori='"'+orientation+'"'
     lines.eachWithIndex{ l,i ->
+        // Sampling thins the file only. Line_Index stays the true position of
+        // the line, so a strided profile still points at the right image rows.
+        if (i % stride != 0) return
         int ax0=l[0] as int,ay0=l[1] as int,ax1=l[2] as int,ay1=l[3] as int
         int wa=(ax1-ax0)+(ay1-ay0)+1
         double wFull=wa*widthScale
