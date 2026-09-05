@@ -118,12 +118,25 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         double dsY = server.getHeight() / (double)h
         float[] gray = luminance(source)
 
-        int marginX = Math.round(w * (100d - cfg.analysisPercent) / 200d) as int
-        int marginY = Math.round(h * (100d - cfg.analysisPercent) / 200d) as int
+        // A "Restrict" annotation, when the image carries one, replaces the
+        // centred analysis field outright: it is an explicit instruction about
+        // where to look, so intersecting it with a percentage would quietly
+        // trim what was actually drawn.
+        List fieldRects = restrictRects(imageData, entry.getImageName(), w, h, dsX, dsY)
+        boolean restricted = !fieldRects.isEmpty()
+        if (!restricted) {
+            int marginX = Math.round(w * (100d - cfg.analysisPercent) / 200d) as int
+            int marginY = Math.round(h * (100d - cfg.analysisPercent) / 200d) as int
+            fieldRects = [[marginX, marginY, w-marginX, h-marginY]]
+        }
         boolean[] field = new boolean[w * h]
-        for (int y = marginY; y < h - marginY; y++)
-            Arrays.fill(field, y*w + marginX, y*w + (w-marginX), true)
-        long fieldArea = (long)Math.max(0, w - 2*marginX) * Math.max(0, h - 2*marginY)
+        fieldRects.each { r ->
+            for (int y = r[1] as int; y < (r[3] as int); y++)
+                Arrays.fill(field, y*w + (r[0] as int), y*w + (r[2] as int), true)
+        }
+        // Counted rather than multiplied out, so overlapping rectangles are not
+        // double counted in Percent_Open.
+        long fieldArea = field.count(true)
 
         boolean[] pass1
         double cut1 = Double.NaN
@@ -192,7 +205,7 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         if (cfg.saveMasks)
             ImageIO.write(maskImage(finalMask,w,h), 'PNG', maskDir.resolve(stem+'_wound_mask.png').toFile())
         if (cfg.saveQC)
-            ImageIO.write(qcImage(source, firstMask, finalMask, marginX, marginY), 'PNG', qcDir.resolve(stem+'_QC.png').toFile())
+            ImageIO.write(qcImage(source, firstMask, finalMask, fieldRects), 'PNG', qcDir.resolve(stem+'_QC.png').toFile())
         if (cfg.saveProfiles)
             writeWidthProfile(qcDir.resolve(stem+'_width_profile.csv'), entry.getImageName(),
                 vertical ? 'Vertical' : 'Horizontal', m.lines as List, dsX, dsY, widthScale, pixelUm,
@@ -205,6 +218,10 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
                 meanWidth:m.meanWidth*widthScale, medianWidth:m.medianWidth*widthScale, widthSD:m.widthSD*widthScale,
                 widthSamples:m.samples, centroidX:m.cx*dsX, centroidY:m.cy*dsY,
                 threshold1:cut1, threshold2:cut2,
+                restricted:restricted ? 'YES' : 'NO',
+                fieldX:fieldRects.collect{it[0]}.min()*dsX, fieldY:fieldRects.collect{it[1]}.min()*dsY,
+                fieldW:(fieldRects.collect{it[2]}.max()-fieldRects.collect{it[0]}.min())*dsX,
+                fieldH:(fieldRects.collect{it[3]}.max()-fieldRects.collect{it[1]}.min())*dsY,
                 detection:selected == null ? 'NOT_FOUND' : 'FOUND', refinement:refineStatus]
     } finally {
         // Each readImageData() builds its own server and tile cache. Without
@@ -212,6 +229,39 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         try { imageData.getServer().close() } catch (Exception ignored) {}
         try { imageData.close() } catch (Exception ignored) {}
     }
+}
+
+/**
+ * Analysis-field rectangles taken from annotations labelled "Restrict", in
+ * analysis pixels and clipped to the image. An annotation counts if either its
+ * classification or its name is "Restrict", case-insensitively, because QuPath
+ * offers both and either is a reasonable way to label one. Any ROI shape is
+ * accepted and its bounding box used. An empty list means the image carries no
+ * such annotation and the whole field should be analysed.
+ */
+List restrictRects(imageData, String image, int w, int h, double dsX, double dsY) {
+    def annotations = imageData.getHierarchy().getAnnotationObjects().findAll {
+        String cls = it.getPathClass() == null ? null : it.getPathClass().getName()
+        String name = it.getName()
+        'restrict'.equalsIgnoreCase(cls?.trim()) || 'restrict'.equalsIgnoreCase(name?.trim())
+    }
+    if (annotations.isEmpty()) return []
+    List rects = []
+    annotations.each { a ->
+        def roi = a.getROI()
+        if (roi == null) return
+        int x0 = Math.max(0, (int)Math.floor(roi.getBoundsX() / dsX))
+        int y0 = Math.max(0, (int)Math.floor(roi.getBoundsY() / dsY))
+        int x1 = Math.min(w, (int)Math.ceil((roi.getBoundsX() + roi.getBoundsWidth()) / dsX))
+        int y1 = Math.min(h, (int)Math.ceil((roi.getBoundsY() + roi.getBoundsHeight()) / dsY))
+        if (x1 > x0 && y1 > y0) rects << [x0, y0, x1, y1]
+    }
+    // Falling back to the whole image would silently measure something the user
+    // asked not to be measured, so say so instead.
+    if (rects.isEmpty())
+        throw new IllegalArgumentException(
+            "${image}: every 'Restrict' annotation falls outside the image or is empty at this downsample.")
+    rects
 }
 
 /**
@@ -589,10 +639,12 @@ void replaceGeneratedAnnotation(imageData,boolean[] mask,int w,int h,double dsX,
     if(!area.isEmpty()){def roi=ROIs.createAreaROI(area,ImagePlane.getDefaultPlane());def obj=PathObjects.createAnnotationObject(roi,cls);obj.setName('Scratch wound (generated)');obj.getMeasurementList().put('Scratch assay generated',1d);hierarchy.addObject(obj)}}
 
 BufferedImage maskImage(boolean[] m,int w,int h){BufferedImage out=new BufferedImage(w,h,BufferedImage.TYPE_BYTE_GRAY);for(int y=0;y<h;y++)for(int x=0;x<w;x++)out.raster.setSample(x,y,0,m[y*w+x]?255:0);out}
-BufferedImage qcImage(BufferedImage source,boolean[] p1,boolean[] fin,int mx,int my){int w=source.width,h=source.height;BufferedImage out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB);Graphics2D g=out.createGraphics();g.drawImage(source,0,0,null);g.dispose();for(int y=1;y<h-1;y++)for(int x=1;x<w-1;x++){int i=y*w+x;if(boundary(p1,i,w)&&!boundary(fin,i,w))out.setRGB(x,y,0xFFFF00);if(boundary(fin,i,w))out.setRGB(x,y,0xFF0000)};for(int x=mx;x<w-mx;x++){out.setRGB(x,my,0x00FFFF);out.setRGB(x,h-my-1,0x00FFFF)};for(int y=my;y<h-my;y++){out.setRGB(mx,y,0x00FFFF);out.setRGB(w-mx-1,y,0x00FFFF)};out}
+BufferedImage qcImage(BufferedImage source,boolean[] p1,boolean[] fin,List rects){int w=source.width,h=source.height;BufferedImage out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB);Graphics2D g=out.createGraphics();g.drawImage(source,0,0,null);g.dispose();for(int y=1;y<h-1;y++)for(int x=1;x<w-1;x++){int i=y*w+x;if(boundary(p1,i,w)&&!boundary(fin,i,w))out.setRGB(x,y,0xFFFF00);if(boundary(fin,i,w))out.setRGB(x,y,0xFF0000)};rects.each{r->int x0=r[0] as int,y0=r[1] as int,x1=(r[2] as int)-1,y1=(r[3] as int)-1
+    for(int x=x0;x<=x1;x++){out.setRGB(x,y0,0x00FFFF);out.setRGB(x,y1,0x00FFFF)}
+    for(int y=y0;y<=y1;y++){out.setRGB(x0,y,0x00FFFF);out.setRGB(x1,y,0x00FFFF)}};out}
 boolean boundary(boolean[] m,int i,int w){m[i]&&(!m[i-1]||!m[i+1]||!m[i-w]||!m[i+w])}
 
-void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=['Image','Orientation','Wound_Area_px2','Wound_Area_um2','Holes_Filled_px2','Percent_Open','Scratch_Length_px','Mean_Width_px','Median_Width_px','Width_SD_px','Width_Samples','Centroid_X_px','Centroid_Y_px','Pass1_Threshold','Pass2_Threshold','Detection_Status','Refinement_Status'];def keys=['image','orientation','areaPx','areaUm2','holesFilled','percentOpen','length','meanWidth','medianWidth','widthSD','widthSamples','centroidX','centroidY','threshold1','threshold2','detection','refinement'];List lines=[names.join(',')];rows.each{r->lines<<keys.collect{k->def v=r[k];v instanceof Number?(Double.isFinite(v as double)?d.format(v):'NA'):('"'+v.toString().replace('"','""')+'"')}.join(',')};Files.write(p,lines,StandardCharsets.UTF_8)}
+void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=['Image','Orientation','Wound_Area_px2','Wound_Area_um2','Holes_Filled_px2','Percent_Open','Restricted','Field_X_px','Field_Y_px','Field_W_px','Field_H_px','Scratch_Length_px','Mean_Width_px','Median_Width_px','Width_SD_px','Width_Samples','Centroid_X_px','Centroid_Y_px','Pass1_Threshold','Pass2_Threshold','Detection_Status','Refinement_Status'];def keys=['image','orientation','areaPx','areaUm2','holesFilled','percentOpen','restricted','fieldX','fieldY','fieldW','fieldH','length','meanWidth','medianWidth','widthSD','widthSamples','centroidX','centroidY','threshold1','threshold2','detection','refinement'];List lines=[names.join(',')];rows.each{r->lines<<keys.collect{k->def v=r[k];v instanceof Number?(Double.isFinite(v as double)?d.format(v):'NA'):('"'+v.toString().replace('"','""')+'"')}.join(',')};Files.write(p,lines,StandardCharsets.UTF_8)}
 /**
  * One row per scan line for a single image: where the line entered and left the
  * wound, and how wide it was. This is the raw material behind Mean_Width_px and

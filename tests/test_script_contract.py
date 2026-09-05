@@ -65,6 +65,17 @@ assert "profileStride" in text
 assert "if (i % stride != 0) return" in text
 assert "positiveInt(f.profileStride.text" in text
 
+# A "Restrict" annotation confines the analysis field; without one the whole
+# centred field is used. Matching is on classification or name, either case.
+assert "List restrictRects(imageData, String image, int w, int h, double dsX, double dsY)" in text
+assert "'restrict'.equalsIgnoreCase(cls?.trim()) || 'restrict'.equalsIgnoreCase(name?.trim())" in text
+# A Restrict that misses the image must fail loudly, never fall back to all of it.
+assert "outside the image" in text
+# Percent_Open must not double count overlapping rectangles.
+assert "long fieldArea = field.count(true)" in text
+# The QC overlay draws the field that was actually used.
+assert "BufferedImage qcImage(BufferedImage source,boolean[] p1,boolean[] fin,List rects)" in text
+
 # Width is measured across the scratch. Measuring the transposed axis is what
 # makes a horizontal scratch correct; it must not be reduced to one axis again.
 assert "Map measurements(boolean[] m,int w,int h,boolean vertical)" in text
@@ -87,7 +98,8 @@ for banned in ("selectComponent", "maxTrackShift", "frameInterval", "baselineAre
 # Protect the stable CSV contract relied on by downstream analysis.
 header = re.search(r"List names=\[(.*?)\];def keys", text, re.S).group(1)
 for required in ("Image", "Orientation", "Wound_Area_px2", "Holes_Filled_px2",
-                 "Percent_Open", "Scratch_Length_px", "Detection_Status"):
+                 "Percent_Open", "Restricted", "Field_X_px", "Scratch_Length_px",
+                 "Detection_Status"):
     assert f"'{required}'" in header
 # Image name is the key, so it must lead the row.
 assert header.startswith("'Image'")

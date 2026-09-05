@@ -52,7 +52,8 @@ For each image, independently:
 2. Convert RGB to luminance and compute a local variance (texture) image.
 3. Create the initial wound mask either from the variance/Otsu workflow or from
    a saved QuPath pixel classifier.
-4. Restrict analysis to a centered field of view and apply binary close/open.
+4. Restrict analysis to a `Restrict` annotation if the image has one, or to a
+   centered field of view otherwise, and apply binary close/open.
 5. Select the largest remaining component.
 6. Fill holes enclosed by that component.
 7. Optionally refine the boundary in a narrow second-pass variance band, then
@@ -87,6 +88,40 @@ step, which is a useful sanity check: a large value means a lot of the gap was
 occupied by cells or debris. `Orientation` records what the image was measured
 as, and `Scratch_Length_px` the wound's extent along the scratch, so the width
 and length columns can always be told apart.
+
+### Restricting analysis to part of the image
+
+To measure only part of a scratch, draw a **rectangle** on the image in QuPath
+and label it `Restrict` - either give the annotation that *name*, or that
+*classification*; the script accepts either, ignoring case. Images without one
+are analysed as before, so this is opt-in per image and needs no setting.
+
+A `Restrict` annotation **replaces** the centred **Analysis field (%)** rather
+than intersecting with it: it is an explicit instruction about where to look,
+and intersecting would quietly trim what you drew. `Percent_Open` is then
+relative to the restricted region, which is usually what you want - it is the
+fraction of *the region you chose* that is still open.
+
+Any ROI shape is accepted and its bounding box used, so a rectangle is simply
+the case where the box is the shape. The box is rounded outwards to whole
+analysis pixels, so nothing you drew is lost to the downsample. A `Restrict`
+annotation that falls entirely outside the image is an error rather than a
+silent whole-image run.
+
+Several `Restrict` annotations on one image are unioned into a single analysis
+field, and the image still produces one CSV row. Note that the script keeps a
+single connected component, so if you draw regions on genuinely separate
+wounds only the largest survives - use one region per image for that, or ask
+for per-region rows.
+
+`Restricted` in the summary CSV is `YES` or `NO`, and `Field_X_px`,
+`Field_Y_px`, `Field_W_px`, `Field_H_px` give the bounding box of the field
+that was used, so every row records where it was measured. The QC overlay
+draws that field in cyan, as it always has.
+
+Generated wound annotations are removed and rewritten on each run, but they
+are matched by the **Scratch wound** classification, so your `Restrict`
+rectangles are never touched.
 
 ### Scratch orientation
 
@@ -174,7 +209,7 @@ what it changed.
 | Saved pixel classifier | Project classifier evaluated for every image |
 | Classifier wound class | Exact classifier output class to treat as wound (case-insensitive) |
 | Downsample | Scale used to read images; larger values save memory |
-| Analysis field (%) | Centered width and height included in analysis |
+| Analysis field (%) | Centered width and height included in analysis, when the image has no `Restrict` annotation |
 | Variance radius | Neighborhood radius for the first texture map |
 | Texture smoothing | Gaussian sigma applied to that map |
 | Minimum wound area | Reject a smaller wound (full-resolution pixels²) |
