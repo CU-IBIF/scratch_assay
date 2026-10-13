@@ -128,108 +128,101 @@ sequence tracks that method step for step, but a change to its order of
 operations needs mirroring here too. A real QuPath run stays the authoritative
 check; this is the fast one. Needs `groovy` on `PATH`, or `--groovy-jar`.
 
-## Measured result: the analyzer over-segments this dataset
+## Measured result
 
 Scored over the default 63-image dataset with `run_reference_pipeline.py`,
 mean width against truth, nearly closed frames held out:
 
-| Settings | Width bias | Mean abs. error |
+| Analyzer | Settings | Width bias | Mean abs. error |
+|---|---|---|---|
+| Before the fixes | defaults | +421% | 421% |
+| Before the fixes | second pass off | +395% | 395% |
+| **Current** | **defaults** | **+6.8%** | **7.9%** |
+| Current | second pass off | -6.5% | 13.6% |
+
+Per series at current defaults:
+
+| Series | Width bias | Mean abs. error |
 |---|---|---|
-| Defaults (second pass on, band 20) | +421% | 421% |
-| Second pass off | +395% | 395% |
-| `--experimental-log-variance`, second pass off | +28% | 47% |
-| `--experimental-log-variance`, second pass band 5 | +36% | 46% |
+| `vertical_slow` | -0.2% | **1.5%** |
+| `vertical_static` | +1.6% | **1.7%** |
+| `horizontal_medium` | -0.2% | **1.8%** |
+| `vertical_shading` | -0.3% | **2.3%** |
+| `vertical_debris` | +5.7% | 5.7% |
+| `vertical_fast` | +22.4% | 22.7% (late frames are narrow) |
+| `vertical_narrow` | +76.9% | 76.9% (only 2 frames survive, see below) |
 
-The log-variance percentages are dominated by a few narrow wounds; on the five
-series whose wound is a reasonable share of the frame it lands within 13%:
+Four series - including one with heavy uneven illumination and one with debris
+in the gap - are measured to within **2.3%**. That is the benchmark's main
+result: on wounds the method can resolve, it is accurate.
 
-| Series (log-variance, second pass off) | Width bias |
-|---|---|
-| `vertical_static` | -7.5% (-11.2px) |
-| `vertical_slow` | -9.4% (-11.8px) |
-| `vertical_debris` | -10.7% (-14.2px) |
-| `vertical_shading` | -12.1% (-11.5px) |
-| `horizontal_medium` | -12.6% (-11.9px) |
-| `vertical_fast` | +33.7% (late frames are narrow) |
-| `vertical_narrow` | +314% (wound is 20-45px wide) |
+### Leave the second pass on, now
 
-The residual on the five good series is a consistent **-11 to -14 px**, about
-5-7 px per edge, and it has a clean explanation: the halo is a steep intensity
-*gradient* at the boundary, so the pixels right at the edge have high local
-variance and read as sheet. A texture threshold therefore sits slightly inside
-the true edge. That is a bias worth knowing about and correcting for; it is not
-a failure.
+This reverses the earlier advice in this file. Before the log-variance fix the
+second pass was clearly harmful; now the defaults beat second-pass-off (7.9%
+against 13.6%).
 
-Measured widths come back around 470 px on a 480 px-wide frame: the analyzer is
-selecting a component that spans almost the whole field. The second pass adds
-roughly 30 px on top of that, so it is a real but secondary effect.
+Be clear about why, though, because it is **two biases cancelling, not two
+improvements**:
 
-**The data is not the problem.** On a benchmark frame, an oracle threshold -
-the single best cut on the same texture map - misclassifies only **3.7%** of
-the frame. The images are highly separable; it is the choice of threshold that
-fails.
+- a texture threshold sits slightly *inside* the true edge, because the halo is
+  a steep intensity gradient and the boundary pixels therefore have high local
+  variance and read as sheet. Alone this is about -11 px, roughly 5-6 px per
+  edge.
+- the second pass pulls the boundary *outward*, because the halo itself is a
+  smooth bright rim and reads as low-texture. At band 20 this is about +15 px.
 
-### Cause: `otsu` is thresholding the wrong quantity
+Net, on this dataset, roughly +4 px. The cancellation is not a law of nature:
+it depends on the halo width, which depends on the optics. If you change
+objective or camera, re-run the benchmark rather than assuming the default band
+still happens to cancel. Report the numbers from whichever setting you
+validated.
 
-`otsu` is given the raw local variance map. The wound forms a tight class near
-zero, but the sheet's class is broad and heavy-tailed, which breaks Otsu's
-assumption of two compact classes and puts the cut far too high. On one frame:
+### The resolution floor: narrow wounds are refused, not guessed
 
-| What `otsu` is given | Cut | % of frame misclassified |
+The wound-presence test rejects 9 of 63 frames. The rejections are not
+arbitrary - the texture ratio tracks wound width closely:
+
+| True width | Texture ratio | Outcome |
 |---|---|---|
-| Linear variance (what the script does) | 132 | **33.8%** |
-| Standard deviation (sqrt) | 9.05 | 9.2% |
-| `log(1 + variance)` | about 60 | **4.1%** |
-| Oracle best cut | about 50 | 3.7% |
+| 45.0, 40.7, 40.3 px | 2.83, 2.66, 2.66 | kept |
+| 36.2 px | 2.46 | rejected |
+| 31.7, 27.2 px | 2.24, 1.83 | rejected |
+| 22.8, 22.1, 18.3 px | 1.70, 1.90, 1.65 | rejected |
+| 13.9, 10.3, 6.6 px | 1.65, 1.75, 1.56 | rejected |
 
-Thresholding `log(1 + variance)` is near-optimal, which is unsurprising: the
-local variance of a textured field is roughly chi-square distributed and its
-log is roughly Gaussian, which is the shape Otsu expects.
+There is **no clean gap** between a genuinely closed wound (6.6 px, ratio 1.56)
+and a real but narrow one (22.8 px, ratio 1.70), so the test is not really a
+wound-existence test. It is a *can this be measured* test, and it fails for the
+same underlying reason in both cases: with a variance radius of 5 the texture
+map's support is about +-7 px, so a gap narrower than roughly 40 px has no
+pixel whose neighbourhood is purely wound, and its interior reads as
+contaminated sheet.
 
-Over the whole dataset the transform takes the width bias from +395% to +28%,
-and to within 13% on every series whose wound occupies a reasonable share of
-the frame. **It does not rescue narrow or nearly closed wounds**: below roughly
-50 px the wound is too small a class for Otsu to find at all, `vertical_narrow`
-is still +314%, and the closed frames still report a full-frame wound. Those
-need a wound-presence test and a threshold that does not assume two
-comparably-sized classes, not just a better transform.
+**Shrinking the texture scale does not help.** Re-running `vertical_narrow`
+with variance radius 2 and smoothing 1 rejects *every* frame, at a flat ratio
+near 2.0: a small neighbourhood cannot characterise the sheet's texture either,
+so the contrast collapses from the other side. The radius has to span a cell to
+describe the sheet, and that sets a floor on the wound it can resolve - roughly
+**three cell diameters**.
 
-Two consequences worth knowing:
+In practice that floor lands where it matters least. A real scratch starts
+15-25 cell diameters wide, so the floor is only reached near full closure,
+which is where you would want to report "closed" anyway. `vertical_narrow`
+starts at 45 px, about 3.5 cell diameters - deliberately below what any real
+assay would use, because its job is to find the floor. It did.
 
-- The error depends on **how much of the field the wound occupies**, because
-  that sets the class balance Otsu sees. A wound filling 60% of a small frame
-  measures far better than the same wound filling 30% of a larger one. So
-  measurements are sensitive to field of view and magnification.
-- It is **not** an artifact of this appearance model's granularity. An earlier
-  version of the generator with much smoother cells failed the same way
-  (+90 px on the static control at the same frame size); dense cytoplasmic
-  granularity, which is what real phase contrast shows, makes it worse by
-  broadening the sheet's variance distribution further.
+The useful behaviour is that the analyzer **refuses** rather than reporting a
+confident wrong number, and exports `Sheet_Wound_Texture_Ratio` so you can see
+how close to the floor each image sits.
 
-Reproduce, including the proposed fix:
+### Tuning the presence test
 
-```bash
-python3 benchmark/run_reference_pipeline.py --out /tmp/default.csv
-python3 benchmark/run_reference_pipeline.py --no-second-pass --out /tmp/sp_off.csv
-python3 benchmark/run_reference_pipeline.py --experimental-log-variance \
-        --no-second-pass --out /tmp/log.csv
-for f in default sp_off log; do
-  python3 benchmark/score_against_truth.py --measured /tmp/$f.csv | tail -3
-done
-```
-
-`--experimental-log-variance` is **not** what `ScratchAssayAnalyzer.groovy`
-does. It exists so the proposal can be measured before anyone changes the
-script, since changing it moves every number the script has ever produced.
-
-### Also: a closed wound still reports one
-
-`vertical_fast` and `vertical_narrow` close to a few pixels by the last time
-points, and the analyzer reports a full-frame wound for those frames rather
-than nothing. Otsu always returns a cut, even on a unimodal texture map, so
-there is no "is there a wound at all?" test. The scorer lists these separately
-rather than letting a percentage error on a six-pixel wound dominate the
-summary.
+The default minimum ratio of 2.5 sits exactly at the knee for *this* dataset
+(kept frames are at 2.66 and above, rejected ones at 2.46 and below). That
+calibration is against a synthetic appearance model, so check it against your
+own imagery: run with `--min-texture-ratio 0` to disable the test, look at the
+exported ratios for images you trust, and set the threshold below them.
 
 ## Limits of this benchmark
 

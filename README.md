@@ -320,20 +320,29 @@ and is rejected for the same reason.
 
 ### Remaining limitations
 
-Measured against the synthetic benchmark:
+Measured against the synthetic benchmark, where the true wound is known exactly.
+At default settings four of its seven series are measured to within 2.3%,
+including one with heavy uneven illumination and one with debris in the gap.
+What is left:
 
-- **Narrow wounds are unreliable.** Below roughly 50 px at the analysis
-  downsample the wound is too small a class for Otsu to locate, and the
-  presence test can only reject the result, not repair it. Reduce the
-  downsample for narrow wounds so they span more analysis pixels.
-- **The second pass biases outward on phase contrast.** The refinement
-  re-thresholds a band around the first boundary, and the phase-contrast halo
-  is a *smooth* bright rim, so it reads as low-texture and is absorbed into the
-  wound. The bias grows with **Refinement band**.
-- **A texture threshold sits slightly inside the true edge.** The halo is a
-  steep intensity gradient, so the pixels right at the boundary have high local
-  variance and read as sheet. On the benchmark this is a few pixels per edge,
-  and it partly offsets the second-pass bias above rather than compounding it.
+- **There is a resolution floor of roughly three cell diameters.** The variance
+  radius has to span a cell to describe the sheet's texture, which means it
+  cannot resolve a gap much narrower than its own support. Below that the
+  wound's interior reads as contaminated sheet, the texture ratio collapses,
+  and the presence test rejects the frame. Shrinking the radius does not help -
+  it destroys the sheet contrast instead. A real scratch starts 15-25 cell
+  diameters wide, so this is reached only near full closure.
+- **The second pass and the halo bias in opposite directions.** A texture
+  threshold sits slightly inside the true edge, because the halo is a steep
+  gradient and the boundary pixels read as sheet; the second pass pulls outward,
+  because the halo itself is smooth and reads as wound. On the benchmark these
+  roughly cancel at the default **Refinement band** of 20, which is why the
+  defaults beat turning the second pass off. That cancellation depends on the
+  halo width and so on your optics - re-run the benchmark if you change them,
+  rather than assuming it still holds.
+- **Area and length depend on the analysis field, width does not.** A 90% field
+  removes 10% of the scan lines and so 10% of the area and length. Use a 100%
+  field, or a `Restrict` region, when those columns matter.
 
 ## Validation notes
 
