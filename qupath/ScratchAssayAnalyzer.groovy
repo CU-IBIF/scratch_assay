@@ -138,6 +138,9 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         // double counted in Percent_Open.
         long fieldArea = field.count(true)
 
+        // Computed in both modes: the variance threshold needs it, and so does
+        // the wound-presence test below, which guards the classifier too.
+        float[] texture1 = textureMap(gray, w, h, cfg.varianceRadius as int, cfg.smoothSigma as double)
         boolean[] pass1
         double cut1 = Double.NaN
         if (cfg.inputMode == 'Pixel classifier') {
@@ -145,17 +148,32 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
                 cfg.woundClass as String, w, h, ds)
             for (int i=0; i<pass1.length; i++) pass1[i] = pass1[i] && field[i]
         } else {
-            float[] texture1 = gaussian(localVariance(gray, w, h, cfg.varianceRadius as int), w, h, cfg.smoothSigma as double)
             cut1 = otsu(texture1, field)
             pass1 = new boolean[w*h]
             for (int i=0; i<pass1.length; i++) pass1[i] = field[i] && texture1[i] <= cut1
-            texture1 = null
         }
         pass1 = morphology(pass1, w, h, cfg.closeIterations as int, cfg.openIterations as int)
 
         Map selected = largestComponent(pass1, w, h, (cfg.minArea / (dsX*dsY)) as int)
         pass1 = null
         boolean[] firstMask = selected == null ? new boolean[w*h] : selected.mask
+
+        // Otsu always returns a threshold, even on a closed sheet whose texture
+        // map has only one mode, so without this a fully healed wound still
+        // reports one. A real wound is bare substrate and so far smoother than
+        // the sheet around it; a slightly duller patch of sheet is not.
+        double ratio = (selected == null) ? Double.NaN
+                     : textureRatio(texture1, firstMask, field)
+        String detection = 'FOUND'
+        if (selected != null && !(ratio >= (cfg.minTextureRatio as double))) {
+            selected = null
+            firstMask = new boolean[w*h]
+            detection = 'REJECTED_LOW_CONTRAST'
+        } else if (selected == null) {
+            detection = 'NOT_FOUND'
+        }
+        texture1 = null
+
         // Cells and debris sitting in the gap read as high texture, so they
         // punch holes in the wound. Closing them recovers the true open area.
         long holesFilled = (selected != null && cfg.fillHoles) ? fillHoles(firstMask, w, h) : 0L
@@ -170,7 +188,7 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
             boolean[] searchBand = new boolean[w*h]
             for (int i=0; i<searchBand.length; i++) searchBand[i] = outer[i] && !inner[i] && field[i]
             outer = null
-            float[] texture2 = gaussian(localVariance(gray, w, h, cfg.refineVarianceRadius as int), w, h, cfg.refineSmoothSigma as double)
+            float[] texture2 = textureMap(gray, w, h, cfg.refineVarianceRadius as int, cfg.refineSmoothSigma as double)
             cut2 = otsu(texture2, searchBand)
             boolean[] refined = inner
             for (int i=0; i<refined.length; i++) if (searchBand[i] && texture2[i] <= cut2) refined[i] = true
@@ -217,12 +235,15 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
                 percentOpen:100d*m.area/Math.max(1L, fieldArea), length:m.length*lengthScale,
                 meanWidth:m.meanWidth*widthScale, medianWidth:m.medianWidth*widthScale, widthSD:m.widthSD*widthScale,
                 widthSamples:m.samples, centroidX:m.cx*dsX, centroidY:m.cy*dsY,
-                threshold1:cut1, threshold2:cut2,
+                // Reported in variance units, the quantity they describe,
+                // although the threshold is now chosen on its logarithm.
+                threshold1:Math.expm1(cut1), threshold2:Math.expm1(cut2),
+                textureRatio:ratio,
                 restricted:restricted ? 'YES' : 'NO',
                 fieldX:fieldRects.collect{it[0]}.min()*dsX, fieldY:fieldRects.collect{it[1]}.min()*dsY,
                 fieldW:(fieldRects.collect{it[2]}.max()-fieldRects.collect{it[0]}.min())*dsX,
                 fieldH:(fieldRects.collect{it[3]}.max()-fieldRects.collect{it[1]}.min())*dsY,
-                detection:selected == null ? 'NOT_FOUND' : 'FOUND', refinement:refineStatus]
+                detection:detection, refinement:refineStatus]
     } finally {
         // Each readImageData() builds its own server and tile cache. Without
         // this the whole project stays in memory until the script ends.
@@ -335,6 +356,7 @@ Map buildSettingsDialog(project, List entries) {
         refineBand:new TextField('20'),
         refineVarianceRadius:new TextField('3'), refineSmoothSigma:new TextField('1'),
         refineCloseIterations:new TextField('1'), refineOpenIterations:new TextField('0'),
+        minTextureRatio:new TextField('2.5'),
         saveMasks:new CheckBox(), saveQC:new CheckBox(), saveProfiles:new CheckBox(),
         profileStride:new TextField('1')
     ]
@@ -351,7 +373,8 @@ Map buildSettingsDialog(project, List entries) {
                 'Minimum wound area (full-res px²)','Close iterations','Open iterations',
                 'Fill holes in wound','Enable second pass',
                 'Refinement band (full-res px)','Refinement variance radius','Refinement smoothing sigma',
-                'Refinement close iterations','Refinement open iterations','Save masks','Save QC overlays',
+                'Refinement close iterations','Refinement open iterations',
+                'Minimum sheet/wound texture ratio','Save masks','Save QC overlays',
                 'Save width profile CSVs','Width profile stride (every Nth line)']
     def grid=new GridPane(hgap:10,vgap:7,padding:new Insets(12))
     grid.add(new Label("Images to measure (${entries.size()}) and scratch orientation"),0,0)
@@ -380,6 +403,7 @@ Map buildSettingsDialog(project, List entries) {
                refineSmoothSigma:nonnegative(f.refineSmoothSigma.text,'Refinement smoothing'),
                refineCloseIterations:nonnegativeInt(f.refineCloseIterations.text,'Refinement close'),
                refineOpenIterations:nonnegativeInt(f.refineOpenIterations.text,'Refinement open'),
+               minTextureRatio:nonnegative(f.minTextureRatio.text,'Minimum texture ratio'),
                saveMasks:f.saveMasks.selected, saveQC:f.saveQC.selected,
                saveProfiles:f.saveProfiles.selected,
                profileStride:positiveInt(f.profileStride.text,'Profile stride')]
@@ -487,6 +511,45 @@ float[] gaussian(float[] src,int w,int h,double sigma) {
     float[] tmp=new float[src.length]
     for(int y=0;y<h;y++)for(int x=0;x<w;x++){double s=0;for(int j=-r;j<=r;j++)s+=src[y*w+Math.max(0,Math.min(w-1,x+j))]*k[j+r];tmp[y*w+x]=(float)s}
     for(int y=0;y<h;y++)for(int x=0;x<w;x++){double s=0;for(int j=-r;j<=r;j++)s+=tmp[Math.max(0,Math.min(h-1,y+j))*w+x]*k[j+r];src[y*w+x]=(float)s};src
+}
+
+/**
+ * Smoothed local variance, log transformed.
+ *
+ * Otsu assumes two compact classes. Raw local variance does not oblige: the
+ * wound forms a tight class near zero while the cell sheet's is broad and
+ * heavy-tailed, which drags the threshold far above the valley and swallows
+ * much of the sheet. The variance of a textured field is roughly chi-square
+ * distributed, so its logarithm is roughly Gaussian, which is the shape Otsu
+ * expects. On the synthetic benchmark this is the difference between
+ * misclassifying a third of the frame and misclassifying a twenty-fifth of it.
+ *
+ * Every threshold and comparison downstream is therefore in log units; the CSV
+ * converts back so the exported numbers stay in variance units.
+ */
+float[] textureMap(float[] gray,int w,int h,int radius,double sigma){
+    float[] t=gaussian(localVariance(gray,w,h,radius),w,h,sigma)
+    for(int i=0;i<t.length;i++) t[i]=(float)Math.log1p(t[i])
+    t
+}
+
+/**
+ * How many times more textured the analysis field is outside the proposed
+ * wound than inside it, or NaN when either side is empty - which is itself a
+ * rejection, since a mask covering the whole field cannot be a wound.
+ *
+ * Because the map is log(1+variance), the difference of the two means is a log
+ * ratio, so exponentiating gives a scale-free factor: bare substrate runs
+ * several times smoother than a cell sheet, a duller patch of sheet does not.
+ */
+double textureRatio(float[] texture,boolean[] mask,boolean[] field){
+    double inside=0, outside=0; long nIn=0, nOut=0
+    for(int i=0;i<texture.length;i++){
+        if(!field[i]) continue
+        if(mask[i]){ inside+=texture[i]; nIn++ } else { outside+=texture[i]; nOut++ }
+    }
+    if(nIn==0||nOut==0) return Double.NaN
+    Math.exp(outside/nOut - inside/nIn)
 }
 
 double otsu(float[] a,boolean[] use) {
@@ -644,7 +707,7 @@ BufferedImage qcImage(BufferedImage source,boolean[] p1,boolean[] fin,List rects
     for(int y=y0;y<=y1;y++){out.setRGB(x0,y,0x00FFFF);out.setRGB(x1,y,0x00FFFF)}};out}
 boolean boundary(boolean[] m,int i,int w){m[i]&&(!m[i-1]||!m[i+1]||!m[i-w]||!m[i+w])}
 
-void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=['Image','Orientation','Wound_Area_px2','Wound_Area_um2','Holes_Filled_px2','Percent_Open','Restricted','Field_X_px','Field_Y_px','Field_W_px','Field_H_px','Scratch_Length_px','Mean_Width_px','Median_Width_px','Width_SD_px','Width_Samples','Centroid_X_px','Centroid_Y_px','Pass1_Threshold','Pass2_Threshold','Detection_Status','Refinement_Status'];def keys=['image','orientation','areaPx','areaUm2','holesFilled','percentOpen','restricted','fieldX','fieldY','fieldW','fieldH','length','meanWidth','medianWidth','widthSD','widthSamples','centroidX','centroidY','threshold1','threshold2','detection','refinement'];List lines=[names.join(',')];rows.each{r->lines<<keys.collect{k->def v=r[k];v instanceof Number?(Double.isFinite(v as double)?d.format(v):'NA'):('"'+v.toString().replace('"','""')+'"')}.join(',')};Files.write(p,lines,StandardCharsets.UTF_8)}
+void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=['Image','Orientation','Wound_Area_px2','Wound_Area_um2','Holes_Filled_px2','Percent_Open','Restricted','Field_X_px','Field_Y_px','Field_W_px','Field_H_px','Scratch_Length_px','Mean_Width_px','Median_Width_px','Width_SD_px','Width_Samples','Centroid_X_px','Centroid_Y_px','Pass1_Threshold','Pass2_Threshold','Sheet_Wound_Texture_Ratio','Detection_Status','Refinement_Status'];def keys=['image','orientation','areaPx','areaUm2','holesFilled','percentOpen','restricted','fieldX','fieldY','fieldW','fieldH','length','meanWidth','medianWidth','widthSD','widthSamples','centroidX','centroidY','threshold1','threshold2','textureRatio','detection','refinement'];List lines=[names.join(',')];rows.each{r->lines<<keys.collect{k->def v=r[k];v instanceof Number?(Double.isFinite(v as double)?d.format(v):'NA'):('"'+v.toString().replace('"','""')+'"')}.join(',')};Files.write(p,lines,StandardCharsets.UTF_8)}
 /**
  * One row per scan line for a single image: where the line entered and left the
  * wound, and how wide it was. This is the raw material behind Mean_Width_px and

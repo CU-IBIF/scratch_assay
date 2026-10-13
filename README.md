@@ -49,17 +49,20 @@ orientation.
 For each image, independently:
 
 1. Read the image at a configurable downsample.
-2. Convert RGB to luminance and compute a local variance (texture) image.
-3. Create the initial wound mask either from the variance/Otsu workflow or from
+2. Convert RGB to luminance and compute a local variance (texture) image, log
+   transformed.
+3. Create the initial wound mask either from the texture/Otsu workflow or from
    a saved QuPath pixel classifier.
 4. Restrict analysis to a `Restrict` annotation if the image has one, or to a
    centered field of view otherwise, and apply binary close/open.
 5. Select the largest remaining component.
-6. Fill holes enclosed by that component.
-7. Optionally refine the boundary in a narrow second-pass variance band, then
+6. Check it is actually a wound: the sheet around it must be enough more
+   textured than the inside. Reject it if not.
+7. Fill holes enclosed by that component.
+8. Optionally refine the boundary in a narrow second-pass texture band, then
    fill holes again.
-8. Add the final wound as a QuPath annotation and save the image data.
-9. Record the row, then release the image server before moving on.
+9. Add the final wound as a QuPath annotation and save the image data.
+10. Record the row, then release the image server before moving on.
 
 The output is written below the project directory:
 
@@ -83,6 +86,10 @@ the class **Scratch wound** and are replaced on a subsequent run.
 same image, so it is comparable across images without a baseline frame.
 `Detection_Status` is `FOUND` or `NOT_FOUND`; a `NOT_FOUND` row reports a zero
 area and is worth inspecting in the QC overlay before use.
+`Sheet_Wound_Texture_Ratio` is how many times more textured the analysis field
+is outside the wound than inside it - the number the wound-presence test acts
+on. `Detection_Status` is `FOUND`, `NOT_FOUND`, or `REJECTED_LOW_CONTRAST` when
+a candidate was found but was not smooth enough to be bare substrate.
 `Holes_Filled_px2` reports how much of the wound area came from the fill-holes
 step, which is a useful sanity check: a large value means a lot of the gap was
 occupied by cells or debris. `Orientation` records what the image was measured
@@ -216,6 +223,7 @@ what it changed.
 | Close/open iterations | Radius-1 binary morphology passes |
 | Fill holes in wound | Close background regions fully enclosed by the wound |
 | Second pass | Reclassify a band around the first boundary with a finer texture map |
+| Minimum sheet/wound texture ratio | Reject a wound unless the sheet around it is this many times more textured; 0 disables the check |
 | Save masks | Write a binary mask PNG per image |
 | Save QC overlays | Write a QC overlay PNG per image |
 | Save width profile CSVs | Write the measured lines to `QC/<image>_width_profile.csv` |
@@ -277,37 +285,55 @@ model, the ground-truth columns, and the settings to use.
 
 It has already earned its keep: see **Known limitations** below.
 
-## Known limitations
+## Segmentation notes
 
 Measured against the synthetic benchmark, where the true wound is known exactly:
 
-- **`otsu` is thresholding the wrong quantity, and it over-segments badly.**
-  It is given raw local variance, whose bright class is broad and heavy-tailed;
-  that breaks Otsu's two-compact-class assumption and puts the threshold far
-  too high. Over the 63-image benchmark the measured wound comes back around
-  470 px wide on a 480 px frame - almost the whole field - while an oracle
-  threshold on the same texture map misclassifies only 3.7% of it, so the data
-  is separable and the method is what fails. Thresholding
-  `log(1 + variance)` takes the width bias over the whole dataset from +395% to
-  +28%, and to within 13% on every series whose wound is a reasonable share of
-  the frame. Because the error depends on the class balance Otsu sees, it also
-  means **measurements are sensitive to field of view and magnification**, and
-  the transform alone does not rescue wounds narrower than about 50 px.
-- **The second pass biases the wound outward on phase contrast.** The
-  refinement re-thresholds a band around the first boundary with a finer
-  texture map, but the phase-contrast halo is a *smooth* bright rim, so it
-  reads as low-texture and is absorbed into the wound. The bias grows with
-  **Refinement band**. Real, but secondary to the above: about 30 px on top of
-  a 265 px error at the default band.
-- **A closed wound still reports a wound.** Otsu always returns a cut, even on
-  a unimodal texture map, so there is no test for whether a wound is present at
-  all. Frames where the scratch has closed to a few pixels report a full-frame
-  wound.
+### Thresholding
 
-None of these is fixed in the script yet: each changes every number it
-produces, and that is a decision for the people whose data it is.
-`benchmark/run_reference_pipeline.py --experimental-log-variance` measures the
-first fix without touching the script.
+The segmentation thresholds the **logarithm** of the local variance, not the
+variance itself. Otsu assumes two compact classes; raw variance gives it a
+tight class near zero for the wound and a broad, heavy-tailed one for the cell
+sheet, which drags the threshold far above the valley and swallows much of the
+sheet. The variance of a textured field is roughly chi-square distributed, so
+its log is roughly Gaussian, which is the shape Otsu expects. On the synthetic
+benchmark this is the difference between measuring a wound almost the width of
+the frame and measuring it to within a few percent.
+
+`Pass1_Threshold` and `Pass2_Threshold` are still reported in variance units,
+so they mean what they always meant, even though the cut is now chosen on the
+log.
+
+### Wound presence
+
+Otsu returns a threshold whatever it is given, including a closed sheet whose
+texture map has only one mode, so on its own it will always find a "wound".
+Each candidate therefore has to earn the name: the analysis field outside it
+must be at least **Minimum sheet/wound texture ratio** times more textured than
+the inside. Bare substrate runs several times smoother than a cell sheet; a
+slightly duller patch of sheet does not. A candidate that fails is reported as
+`REJECTED_LOW_CONTRAST` with zero area, and the measured ratio is exported on
+every row so the threshold can be tuned to your imagery.
+
+A mask covering the entire analysis field leaves no outside to compare against,
+and is rejected for the same reason.
+
+### Remaining limitations
+
+Measured against the synthetic benchmark:
+
+- **Narrow wounds are unreliable.** Below roughly 50 px at the analysis
+  downsample the wound is too small a class for Otsu to locate, and the
+  presence test can only reject the result, not repair it. Reduce the
+  downsample for narrow wounds so they span more analysis pixels.
+- **The second pass biases outward on phase contrast.** The refinement
+  re-thresholds a band around the first boundary, and the phase-contrast halo
+  is a *smooth* bright rim, so it reads as low-texture and is absorbed into the
+  wound. The bias grows with **Refinement band**.
+- **A texture threshold sits slightly inside the true edge.** The halo is a
+  steep intensity gradient, so the pixels right at the boundary have high local
+  variance and read as sheet. On the benchmark this is a few pixels per edge,
+  and it partly offsets the second-pass bias above rather than compounding it.
 
 ## Validation notes
 

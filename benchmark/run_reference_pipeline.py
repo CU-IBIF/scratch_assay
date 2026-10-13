@@ -39,7 +39,7 @@ from pathlib import Path
 HELPERS = [
     'isHorizontal', 'luminance', 'boxSum', 'localVariance', 'gaussian', 'otsu',
     'morphology', 'dilate', 'erode', 'flood', 'largestComponent', 'fillHoles',
-    'measurements',
+    'measurements', 'textureMap', 'textureRatio',
 ]
 
 DEF_RE = re.compile(
@@ -149,17 +149,31 @@ def analyse = { BufferedImage src, boolean vertical, Map cfg ->
     for (int y=my; y<h-my; y++) Arrays.fill(field, y*w+mx, y*w+(w-mx), true)
     long fieldArea = field.count(true)
 
-    float[] tex = gaussian(localVariance(gray,w,h,cfg.varianceRadius as int),w,h,cfg.smoothSigma as double)
-    // Not what the analyzer does: an experimental variant, so the benchmark can
-    // put a number on the proposal before anyone changes the script.
-    if (cfg.logVariance) for (int i=0;i<tex.length;i++) tex[i] = (float)Math.log(1.0d + tex[i])
-    double cut1 = otsu(tex, field)
+    float[] texLog = textureMap(gray,w,h,cfg.varianceRadius as int,cfg.smoothSigma as double)
+    // legacyLinear undoes the log transform to reproduce the pre-fix behaviour
+    // for comparison. The presence test always uses the log map, whose mean
+    // difference is a log ratio.
+    float[] texThr = texLog
+    if (cfg.legacyLinear) {
+        texThr = new float[texLog.length]
+        for (int i=0;i<texThr.length;i++) texThr[i] = (float)Math.expm1(texLog[i])
+    }
+    double cut1 = otsu(texThr, field)
     boolean[] pass1 = new boolean[w*h]
-    for (int i=0;i<pass1.length;i++) pass1[i] = field[i] && tex[i] <= cut1
+    for (int i=0;i<pass1.length;i++) pass1[i] = field[i] && texThr[i] <= cut1
     pass1 = morphology(pass1,w,h,cfg.closeIterations as int,cfg.openIterations as int)
 
     def selected = largestComponent(pass1,w,h,cfg.minArea as int)
     boolean[] firstMask = selected == null ? new boolean[w*h] : selected.mask
+    double ratio = (selected == null) ? Double.NaN : textureRatio(texLog, firstMask, field)
+    String detection = 'FOUND'
+    if (selected != null && !(ratio >= (cfg.minTextureRatio as double))) {
+        selected = null
+        firstMask = new boolean[w*h]
+        detection = 'REJECTED_LOW_CONTRAST'
+    } else if (selected == null) {
+        detection = 'NOT_FOUND'
+    }
     long holes = (selected != null && cfg.fillHoles) ? fillHoles(firstMask,w,h) : 0L
     boolean[] finalMask = firstMask
     double cut2 = Double.NaN
@@ -170,8 +184,8 @@ def analyse = { BufferedImage src, boolean vertical, Map cfg ->
         boolean[] inner = erode(firstMask,w,h,band), outer = dilate(firstMask,w,h,band)
         boolean[] bandMask = new boolean[w*h]
         for (int i=0;i<bandMask.length;i++) bandMask[i] = outer[i] && !inner[i] && field[i]
-        float[] tex2 = gaussian(localVariance(gray,w,h,cfg.refineVarianceRadius as int),w,h,cfg.refineSmoothSigma as double)
-        if (cfg.logVariance) for (int i=0;i<tex2.length;i++) tex2[i] = (float)Math.log(1.0d + tex2[i])
+        float[] tex2 = textureMap(gray,w,h,cfg.refineVarianceRadius as int,cfg.refineSmoothSigma as double)
+        if (cfg.legacyLinear) for (int i=0;i<tex2.length;i++) tex2[i] = (float)Math.expm1(tex2[i])
         cut2 = otsu(tex2, bandMask)
         boolean[] refined = inner
         for (int i=0;i<refined.length;i++) if (bandMask[i] && tex2[i] <= cut2) refined[i] = true
@@ -187,8 +201,9 @@ def analyse = { BufferedImage src, boolean vertical, Map cfg ->
     def m = measurements(finalMask,w,h,vertical)
     [area:m.area, length:m.length, meanWidth:m.meanWidth, medianWidth:m.medianWidth,
      widthSD:m.widthSD, samples:m.samples, cx:m.cx, cy:m.cy, holes:holes,
-     percentOpen:100d*m.area/Math.max(1L,fieldArea), cut1:cut1, cut2:cut2,
-     detection: selected == null ? 'NOT_FOUND' : 'FOUND', refinement:refineStatus]
+     percentOpen:100d*m.area/Math.max(1L,fieldArea),
+     cut1:Math.expm1(cut1), cut2:Math.expm1(cut2), ratio:ratio,
+     detection:detection, refinement:refineStatus]
 }
 
 // Settings arrive as key=value pairs rather than JSON: groovy-json is a
@@ -211,7 +226,7 @@ def hdr = lines[0].split(',') as List
 List out = ['Image,Orientation,Wound_Area_px2,Holes_Filled_px2,Percent_Open,Restricted,' +
             'Scratch_Length_px,Mean_Width_px,Median_Width_px,Width_SD_px,Width_Samples,' +
             'Centroid_X_px,Centroid_Y_px,Pass1_Threshold,Pass2_Threshold,' +
-            'Detection_Status,Refinement_Status']
+            'Sheet_Wound_Texture_Ratio,Detection_Status,Refinement_Status']
 int done = 0
 lines[1..-1].collect{ it.split(',') }.sort{ it[hdr.indexOf('Image')] }.each { f ->
     String name = f[hdr.indexOf('Image')]
@@ -221,7 +236,7 @@ lines[1..-1].collect{ it.split(',') }.sort{ it[hdr.indexOf('Image')] }.each { f 
     def r = analyse(im, !isHorizontal(orientation), cfg)
     out << [q(name), q(orientation), r.area as String, nf(r.holes), nf(r.percentOpen), q('NO'),
             nf(r.length), nf(r.meanWidth), nf(r.medianWidth), nf(r.widthSD), r.samples as String,
-            nf(r.cx), nf(r.cy), nf(r.cut1), nf(r.cut2),
+            nf(r.cx), nf(r.cy), nf(r.cut1), nf(r.cut2), nf(r.ratio),
             q(r.detection), q(r.refinement)].join(',')
     done++
     if (done % 10 == 0) System.err.println("  ${done} images")
@@ -273,11 +288,14 @@ def main(argv=None):
     p.add_argument('--refine-smooth-sigma', type=float, default=1.0)
     p.add_argument('--refine-close-iterations', type=int, default=1)
     p.add_argument('--refine-open-iterations', type=int, default=0)
-    p.add_argument('--experimental-log-variance', action='store_true',
-                   help='threshold log(1+variance) instead of raw variance. '
-                        'This is NOT what ScratchAssayAnalyzer.groovy does; it '
-                        'exists so the benchmark can measure the proposed fix '
-                        'for the over-segmentation described in the README.')
+    p.add_argument('--min-texture-ratio', type=float, default=2.5,
+                   help='reject a proposed wound unless the field outside it is '
+                        'this many times more textured (default 2.5, as in the '
+                        'analyzer). 0 disables the presence test.')
+    p.add_argument('--legacy-linear-variance', action='store_true',
+                   help='threshold raw variance instead of log(1+variance), '
+                        'reproducing the behaviour from before that fix. For '
+                        'measuring what the change bought, not for real use.')
     a = p.parse_args(argv)
 
     dataset = Path(a.dataset)
@@ -298,7 +316,8 @@ def main(argv=None):
         'refineSmoothSigma': a.refine_smooth_sigma,
         'refineCloseIterations': a.refine_close_iterations,
         'refineOpenIterations': a.refine_open_iterations,
-        'logVariance': a.experimental_log_variance,
+        'minTextureRatio': a.min_texture_ratio,
+        'legacyLinear': a.legacy_linear_variance,
     }
     program = HARNESS + '\n\n' + extract_helpers(Path(a.script), HELPERS) + '\n'
     with tempfile.TemporaryDirectory() as td:

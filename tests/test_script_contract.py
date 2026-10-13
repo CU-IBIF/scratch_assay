@@ -76,6 +76,26 @@ assert "long fieldArea = field.count(true)" in text
 # The QC overlay draws the field that was actually used.
 assert "BufferedImage qcImage(BufferedImage source,boolean[] p1,boolean[] fin,List rects)" in text
 
+# Otsu assumes two compact classes, which raw local variance is not: the
+# threshold must be chosen on the log of the variance map.
+assert "float[] textureMap(float[] gray,int w,int h,int radius,double sigma)" in text
+assert "Math.log1p" in text
+# Exactly one place builds the texture map, so both passes get the transform.
+assert text.count("gaussian(localVariance(") == 1
+assert text.count("textureMap(gray, w, h") == 2
+# Thresholds are exported in variance units even though chosen on the log.
+assert "threshold1:Math.expm1(cut1), threshold2:Math.expm1(cut2)" in text
+
+# Otsu always returns a cut, so a closed sheet needs an explicit presence test
+# or it reports a wound that is not there.
+assert "double textureRatio(float[] texture,boolean[] mask,boolean[] field)" in text
+assert "REJECTED_LOW_CONTRAST" in text
+assert "minTextureRatio" in text
+# A mask covering the whole field yields no outside, which must reject.
+assert "if(nIn==0||nOut==0) return Double.NaN" in text
+# NaN must fail the comparison rather than pass it, hence the negated form.
+assert "!(ratio >= (cfg.minTextureRatio as double))" in text
+
 # Width is measured across the scratch. Measuring the transposed axis is what
 # makes a horizontal scratch correct; it must not be reduced to one axis again.
 assert "Map measurements(boolean[] m,int w,int h,boolean vertical)" in text
@@ -99,7 +119,7 @@ for banned in ("selectComponent", "maxTrackShift", "frameInterval", "baselineAre
 header = re.search(r"List names=\[(.*?)\];def keys", text, re.S).group(1)
 for required in ("Image", "Orientation", "Wound_Area_px2", "Holes_Filled_px2",
                  "Percent_Open", "Restricted", "Field_X_px", "Scratch_Length_px",
-                 "Detection_Status"):
+                 "Sheet_Wound_Texture_Ratio", "Detection_Status"):
     assert f"'{required}'" in header
 # Image name is the key, so it must lead the row.
 assert header.startswith("'Image'")
