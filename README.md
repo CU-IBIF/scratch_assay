@@ -288,9 +288,11 @@ Measured against the synthetic benchmark, where the true wound is known exactly:
   470 px wide on a 480 px frame - almost the whole field - while an oracle
   threshold on the same texture map misclassifies only 3.7% of it, so the data
   is separable and the method is what fails. Thresholding
-  `log(1 + variance)` takes one frame from 34% of pixels misclassified to 4.1%.
-  Because the error depends on the class balance Otsu sees, it also means
-  **measurements are sensitive to field of view and magnification**.
+  `log(1 + variance)` takes the width bias over the whole dataset from +395% to
+  +28%, and to within 13% on every series whose wound is a reasonable share of
+  the frame. Because the error depends on the class balance Otsu sees, it also
+  means **measurements are sensitive to field of view and magnification**, and
+  the transform alone does not rescue wounds narrower than about 50 px.
 - **The second pass biases the wound outward on phase contrast.** The
   refinement re-thresholds a band around the first boundary with a finer
   texture map, but the phase-contrast halo is a *smooth* bright rim, so it

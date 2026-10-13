@@ -137,6 +137,28 @@ mean width against truth, nearly closed frames held out:
 |---|---|---|
 | Defaults (second pass on, band 20) | +421% | 421% |
 | Second pass off | +395% | 395% |
+| `--experimental-log-variance`, second pass off | +28% | 47% |
+| `--experimental-log-variance`, second pass band 5 | +36% | 46% |
+
+The log-variance percentages are dominated by a few narrow wounds; on the five
+series whose wound is a reasonable share of the frame it lands within 13%:
+
+| Series (log-variance, second pass off) | Width bias |
+|---|---|
+| `vertical_static` | -7.5% (-11.2px) |
+| `vertical_slow` | -9.4% (-11.8px) |
+| `vertical_debris` | -10.7% (-14.2px) |
+| `vertical_shading` | -12.1% (-11.5px) |
+| `horizontal_medium` | -12.6% (-11.9px) |
+| `vertical_fast` | +33.7% (late frames are narrow) |
+| `vertical_narrow` | +314% (wound is 20-45px wide) |
+
+The residual on the five good series is a consistent **-11 to -14 px**, about
+5-7 px per edge, and it has a clean explanation: the halo is a steep intensity
+*gradient* at the boundary, so the pixels right at the edge have high local
+variance and read as sheet. A texture threshold therefore sits slightly inside
+the true edge. That is a bias worth knowing about and correcting for; it is not
+a failure.
 
 Measured widths come back around 470 px on a 480 px-wide frame: the analyzer is
 selecting a component that spans almost the whole field. The second pass adds
@@ -163,6 +185,14 @@ assumption of two compact classes and puts the cut far too high. On one frame:
 Thresholding `log(1 + variance)` is near-optimal, which is unsurprising: the
 local variance of a textured field is roughly chi-square distributed and its
 log is roughly Gaussian, which is the shape Otsu expects.
+
+Over the whole dataset the transform takes the width bias from +395% to +28%,
+and to within 13% on every series whose wound occupies a reasonable share of
+the frame. **It does not rescue narrow or nearly closed wounds**: below roughly
+50 px the wound is too small a class for Otsu to find at all, `vertical_narrow`
+is still +314%, and the closed frames still report a full-frame wound. Those
+need a wound-presence test and a threshold that does not assume two
+comparably-sized classes, not just a better transform.
 
 Two consequences worth knowing:
 

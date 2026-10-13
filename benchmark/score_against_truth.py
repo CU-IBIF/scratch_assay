@@ -141,7 +141,7 @@ def main(argv=None):
     overall = {'width': Acc('Mean width', 'px'), 'median': Acc('Median width', 'px'),
                'area': Acc('Wound area', 'px2'), 'length': Acc('Scratch length', 'px')}
     by_series = {}
-    notes, rows, nearly_closed = [], [], []
+    notes, rows, nearly_closed, length_ratios = [], [], [], []
 
     for k in sorted(shared):
         t, m = truth[k], measured[k]
@@ -178,9 +178,11 @@ def main(argv=None):
             notes.append('%s: measured with a Restrict region, so area and '
                          'Percent_Open are not on the same basis as the truth' % k)
         if tl and ml and ml < 0.97 * tl:
-            notes.append('%s: measured length %.0f vs true %.0f - the analysis '
-                         'field is clipping scan lines; re-run with Analysis '
-                         'field = 100 before trusting area or length' % (k, ml, tl))
+            # A uniform shortfall across the set means the analysis field is
+            # clipping scan lines; a one-off means the detected wound simply
+            # did not reach the edges. Guessing between them per row produces
+            # false alarms, so record the ratio and judge it in aggregate.
+            length_ratios.append((k, ml / tl))
         det = text(m, 'Detection_Status').upper()
         if det == 'NOT_FOUND' and ta and ta > 0:
             notes.append('%s: nothing detected, but the wound is %.0f px2' % (k, ta))
@@ -217,6 +219,23 @@ def main(argv=None):
         if wst:
             print('  worst %-14s %s  true=%.1f measured=%.1f (%+.1f)'
                   % (name, wst[0], wst[2], wst[3], wst[1]))
+
+    if length_ratios:
+        ratios = sorted(r for _k, r in length_ratios)
+        med = ratios[len(ratios) // 2]
+        worst_image, worst_ratio = min(length_ratios, key=lambda kr: kr[1])
+        print('\n%d of %d image(s) have a scratch shorter than the truth '
+              '(median %.0f%% of it).'
+              % (len(length_ratios), len(shared), 100 * med))
+        if ratios[-1] - ratios[0] < 0.06:
+            print('  The shortfall is uniform, which is what a clipping '
+                  'analysis field looks like. Re-run with Analysis field = 100 '
+                  'before trusting the area or length columns.')
+        else:
+            print('  The shortfall varies between images, so this is the '
+                  'detected wound not reaching the frame edges rather than a '
+                  'field setting. Worst: %s at %.0f%%.'
+                  % (worst_image, 100 * worst_ratio))
 
     if nearly_closed:
         print('\nNearly closed (true width < %gpx), held out of the aggregate:'
