@@ -128,36 +128,78 @@ sequence tracks that method step for step, but a change to its order of
 operations needs mirroring here too. A real QuPath run stays the authoritative
 check; this is the fast one. Needs `groovy` on `PATH`, or `--groovy-jar`.
 
-## Known result: the second pass biases outward on phase contrast
+## Measured result: the analyzer over-segments this dataset
 
-Measured over the default dataset, mean width against truth:
+Scored over the default 63-image dataset with `run_reference_pipeline.py`,
+mean width against truth, nearly closed frames held out:
 
-| Setting | Width bias | Mean abs. error |
+| Settings | Width bias | Mean abs. error |
 |---|---|---|
-| Second pass **off** | about +3% | a few percent |
-| Second pass **on**, band 20 (default) | about +35% | about 35% |
-| Second pass on, band 10 | about +17% | |
-| Second pass on, band 5 | about +10% | |
+| Defaults (second pass on, band 20) | +421% | 421% |
+| Second pass off | +395% | 395% |
 
-The cause is structural, not a coding error. The second pass re-thresholds a
-band straddling the first boundary using a *finer* variance map. The
-phase-contrast halo is a **smooth** bright rim, so it has low local variance
-and reads as wound. The wider the refinement band, the more halo gets absorbed,
-and the bias scales with the band.
+Measured widths come back around 470 px on a 480 px-wide frame: the analyzer is
+selecting a component that spans almost the whole field. The second pass adds
+roughly 30 px on top of that, so it is a real but secondary effect.
 
-So for phase contrast: **leave the second pass off, or use a band no wider than
-the halo** (roughly `sigma_outer` in the model, a handful of pixels). The second
-pass was ported from the ImageJ workflow, where it was tuned for different
-imagery; this is the benchmark earning its keep by pinning that down with a
-number.
+**The data is not the problem.** On a benchmark frame, an oracle threshold -
+the single best cut on the same texture map - misclassifies only **3.7%** of
+the frame. The images are highly separable; it is the choice of threshold that
+fails.
 
-Reproduce both sides with:
+### Cause: `otsu` is thresholding the wrong quantity
+
+`otsu` is given the raw local variance map. The wound forms a tight class near
+zero, but the sheet's class is broad and heavy-tailed, which breaks Otsu's
+assumption of two compact classes and puts the cut far too high. On one frame:
+
+| What `otsu` is given | Cut | % of frame misclassified |
+|---|---|---|
+| Linear variance (what the script does) | 132 | **33.8%** |
+| Standard deviation (sqrt) | 9.05 | 9.2% |
+| `log(1 + variance)` | about 60 | **4.1%** |
+| Oracle best cut | about 50 | 3.7% |
+
+Thresholding `log(1 + variance)` is near-optimal, which is unsurprising: the
+local variance of a textured field is roughly chi-square distributed and its
+log is roughly Gaussian, which is the shape Otsu expects.
+
+Two consequences worth knowing:
+
+- The error depends on **how much of the field the wound occupies**, because
+  that sets the class balance Otsu sees. A wound filling 60% of a small frame
+  measures far better than the same wound filling 30% of a larger one. So
+  measurements are sensitive to field of view and magnification.
+- It is **not** an artifact of this appearance model's granularity. An earlier
+  version of the generator with much smoother cells failed the same way
+  (+90 px on the static control at the same frame size); dense cytoplasmic
+  granularity, which is what real phase contrast shows, makes it worse by
+  broadening the sheet's variance distribution further.
+
+Reproduce, including the proposed fix:
 
 ```bash
-python3 benchmark/run_reference_pipeline.py --out /tmp/sp_on.csv
+python3 benchmark/run_reference_pipeline.py --out /tmp/default.csv
 python3 benchmark/run_reference_pipeline.py --no-second-pass --out /tmp/sp_off.csv
-python3 benchmark/score_against_truth.py --measured /tmp/sp_off.csv
+python3 benchmark/run_reference_pipeline.py --experimental-log-variance \
+        --no-second-pass --out /tmp/log.csv
+for f in default sp_off log; do
+  python3 benchmark/score_against_truth.py --measured /tmp/$f.csv | tail -3
+done
 ```
+
+`--experimental-log-variance` is **not** what `ScratchAssayAnalyzer.groovy`
+does. It exists so the proposal can be measured before anyone changes the
+script, since changing it moves every number the script has ever produced.
+
+### Also: a closed wound still reports one
+
+`vertical_fast` and `vertical_narrow` close to a few pixels by the last time
+points, and the analyzer reports a full-frame wound for those frames rather
+than nothing. Otsu always returns a cut, even on a unimodal texture map, so
+there is no "is there a wound at all?" test. The scorer lists these separately
+rather than letting a percentage error on a six-pixel wound dominate the
+summary.
 
 ## Limits of this benchmark
 

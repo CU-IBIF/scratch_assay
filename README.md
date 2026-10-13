@@ -281,23 +281,31 @@ It has already earned its keep: see **Known limitations** below.
 
 Measured against the synthetic benchmark, where the true wound is known exactly:
 
+- **`otsu` is thresholding the wrong quantity, and it over-segments badly.**
+  It is given raw local variance, whose bright class is broad and heavy-tailed;
+  that breaks Otsu's two-compact-class assumption and puts the threshold far
+  too high. Over the 63-image benchmark the measured wound comes back around
+  470 px wide on a 480 px frame - almost the whole field - while an oracle
+  threshold on the same texture map misclassifies only 3.7% of it, so the data
+  is separable and the method is what fails. Thresholding
+  `log(1 + variance)` takes one frame from 34% of pixels misclassified to 4.1%.
+  Because the error depends on the class balance Otsu sees, it also means
+  **measurements are sensitive to field of view and magnification**.
 - **The second pass biases the wound outward on phase contrast.** The
   refinement re-thresholds a band around the first boundary with a finer
   texture map, but the phase-contrast halo is a *smooth* bright rim, so it
   reads as low-texture and is absorbed into the wound. The bias grows with
-  **Refinement band**. Prefer the second pass off, or a band no wider than the
-  halo.
-- **`otsu` is thresholding the wrong quantity.** It is given raw local
-  variance, whose bright class is very broad and heavy-tailed, which breaks
-  Otsu's two-compact-class assumption and puts the threshold far too high. On a
-  benchmark frame whose best achievable threshold misclassifies 3.7% of the
-  frame, the current threshold misclassifies 34%; thresholding
-  `log(1 + variance)` instead gets 4.1%. The practical effect is
-  over-segmentation that worsens as the wound occupies less of the field, so
-  measurements depend on the field of view.
+  **Refinement band**. Real, but secondary to the above: about 30 px on top of
+  a 265 px error at the default band.
+- **A closed wound still reports a wound.** Otsu always returns a cut, even on
+  a unimodal texture map, so there is no test for whether a wound is present at
+  all. Frames where the scratch has closed to a few pixels report a full-frame
+  wound.
 
-Neither is fixed in the script yet, because both change every number it
-produces and that is a decision for the people whose data it is.
+None of these is fixed in the script yet: each changes every number it
+produces, and that is a decision for the people whose data it is.
+`benchmark/run_reference_pipeline.py --experimental-log-variance` measures the
+first fix without touching the script.
 
 ## Validation notes
 

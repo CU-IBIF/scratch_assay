@@ -150,6 +150,9 @@ def analyse = { BufferedImage src, boolean vertical, Map cfg ->
     long fieldArea = field.count(true)
 
     float[] tex = gaussian(localVariance(gray,w,h,cfg.varianceRadius as int),w,h,cfg.smoothSigma as double)
+    // Not what the analyzer does: an experimental variant, so the benchmark can
+    // put a number on the proposal before anyone changes the script.
+    if (cfg.logVariance) for (int i=0;i<tex.length;i++) tex[i] = (float)Math.log(1.0d + tex[i])
     double cut1 = otsu(tex, field)
     boolean[] pass1 = new boolean[w*h]
     for (int i=0;i<pass1.length;i++) pass1[i] = field[i] && tex[i] <= cut1
@@ -168,6 +171,7 @@ def analyse = { BufferedImage src, boolean vertical, Map cfg ->
         boolean[] bandMask = new boolean[w*h]
         for (int i=0;i<bandMask.length;i++) bandMask[i] = outer[i] && !inner[i] && field[i]
         float[] tex2 = gaussian(localVariance(gray,w,h,cfg.refineVarianceRadius as int),w,h,cfg.refineSmoothSigma as double)
+        if (cfg.logVariance) for (int i=0;i<tex2.length;i++) tex2[i] = (float)Math.log(1.0d + tex2[i])
         cut2 = otsu(tex2, bandMask)
         boolean[] refined = inner
         for (int i=0;i<refined.length;i++) if (bandMask[i] && tex2[i] <= cut2) refined[i] = true
@@ -269,6 +273,11 @@ def main(argv=None):
     p.add_argument('--refine-smooth-sigma', type=float, default=1.0)
     p.add_argument('--refine-close-iterations', type=int, default=1)
     p.add_argument('--refine-open-iterations', type=int, default=0)
+    p.add_argument('--experimental-log-variance', action='store_true',
+                   help='threshold log(1+variance) instead of raw variance. '
+                        'This is NOT what ScratchAssayAnalyzer.groovy does; it '
+                        'exists so the benchmark can measure the proposed fix '
+                        'for the over-segmentation described in the README.')
     a = p.parse_args(argv)
 
     dataset = Path(a.dataset)
@@ -289,6 +298,7 @@ def main(argv=None):
         'refineSmoothSigma': a.refine_smooth_sigma,
         'refineCloseIterations': a.refine_close_iterations,
         'refineOpenIterations': a.refine_open_iterations,
+        'logVariance': a.experimental_log_variance,
     }
     program = HARNESS + '\n\n' + extract_helpers(Path(a.script), HELPERS) + '\n'
     with tempfile.TemporaryDirectory() as td:
