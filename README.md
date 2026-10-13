@@ -255,6 +255,50 @@ If you hit that message, in rough order of effect:
 - reduce the **Analysis field (%)**;
 - give QuPath more memory under **Edit > Preferences > Memory**.
 
+## Synthetic benchmark
+
+`benchmark/` generates a phase-contrast scratch assay time series with **exact
+ground truth** and scores a run against it, so the analyzer can be checked
+against known answers rather than by eye:
+
+```bash
+python3 benchmark/generate_synthetic.py --out benchmark/dataset
+# import benchmark/dataset/images into a QuPath project, run the analyzer
+python3 benchmark/score_against_truth.py \
+    --measured .../Scratch_Assay_Results/Scratch_Assay_Measurements.csv
+```
+
+The images model phase contrast properly - halo, shade-off, and a cell sheet
+told apart from bare substrate by *texture* rather than brightness - so they
+exercise the same cue the analyzer thresholds. Seven series cover fast and slow
+closure, a no-migration control, a narrow wound, a rotated wound, debris in the
+gap, and heavy uneven illumination. See `benchmark/README.md` for the imaging
+model, the ground-truth columns, and the settings to use.
+
+It has already earned its keep: see **Known limitations** below.
+
+## Known limitations
+
+Measured against the synthetic benchmark, where the true wound is known exactly:
+
+- **The second pass biases the wound outward on phase contrast.** The
+  refinement re-thresholds a band around the first boundary with a finer
+  texture map, but the phase-contrast halo is a *smooth* bright rim, so it
+  reads as low-texture and is absorbed into the wound. The bias grows with
+  **Refinement band**. Prefer the second pass off, or a band no wider than the
+  halo.
+- **`otsu` is thresholding the wrong quantity.** It is given raw local
+  variance, whose bright class is very broad and heavy-tailed, which breaks
+  Otsu's two-compact-class assumption and puts the threshold far too high. On a
+  benchmark frame whose best achievable threshold misclassifies 3.7% of the
+  frame, the current threshold misclassifies 34%; thresholding
+  `log(1 + variance)` instead gets 4.1%. The practical effect is
+  over-segmentation that worsens as the wound occupies less of the field, so
+  measurements depend on the field of view.
+
+Neither is fixed in the script yet, because both change every number it
+produces and that is a decision for the people whose data it is.
+
 ## Validation notes
 
 Segmentation is deterministic for a given QuPath image server and parameter
@@ -270,6 +314,7 @@ Run the repository checks without launching QuPath:
 
 ```bash
 python3 tests/test_script_contract.py
+python3 tests/test_benchmark.py
 ```
 
 The contract test verifies required exports, the CSV contract, memory hygiene,

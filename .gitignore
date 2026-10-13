@@ -1,0 +1,3 @@
+# The synthetic benchmark dataset is reproducible from its seed, so the images
+# and the CSVs derived from them are generated rather than tracked.
+benchmark/dataset/
