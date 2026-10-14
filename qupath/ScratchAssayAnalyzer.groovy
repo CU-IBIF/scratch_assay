@@ -76,7 +76,7 @@ Path output = Path.of(project.getPath().getParent().toString(), 'Scratch_Assay_R
 Path qcDir = output.resolve('QC')
 Path maskDir = output.resolve('Masks')
 Files.createDirectories(output)
-if (cfg.saveQC) Files.createDirectories(qcDir)
+if (cfg.saveQC || cfg.saveProfiles) Files.createDirectories(qcDir)
 if (cfg.saveMasks) Files.createDirectories(maskDir)
 
 List rows = []
@@ -98,7 +98,7 @@ Dialogs.showInfoNotification('Scratch Assay Analyzer', "Measured ${jobs.size()} 
  * map is the complete result for this entry.
  */
 Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path qcDir) {
-    boolean vertical = !'Horizontal'.equalsIgnoreCase(orientation)
+    boolean vertical = !isHorizontal(orientation)
     def imageData = entry.readImageData()
     try {
         def server = imageData.getServer()
@@ -118,13 +118,29 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         double dsY = server.getHeight() / (double)h
         float[] gray = luminance(source)
 
-        int marginX = Math.round(w * (100d - cfg.analysisPercent) / 200d) as int
-        int marginY = Math.round(h * (100d - cfg.analysisPercent) / 200d) as int
+        // A "Restrict" annotation, when the image carries one, replaces the
+        // centred analysis field outright: it is an explicit instruction about
+        // where to look, so intersecting it with a percentage would quietly
+        // trim what was actually drawn.
+        List fieldRects = restrictRects(imageData, entry.getImageName(), w, h, dsX, dsY)
+        boolean restricted = !fieldRects.isEmpty()
+        if (!restricted) {
+            int marginX = Math.round(w * (100d - cfg.analysisPercent) / 200d) as int
+            int marginY = Math.round(h * (100d - cfg.analysisPercent) / 200d) as int
+            fieldRects = [[marginX, marginY, w-marginX, h-marginY]]
+        }
         boolean[] field = new boolean[w * h]
-        for (int y = marginY; y < h - marginY; y++)
-            Arrays.fill(field, y*w + marginX, y*w + (w-marginX), true)
-        long fieldArea = (long)Math.max(0, w - 2*marginX) * Math.max(0, h - 2*marginY)
+        fieldRects.each { r ->
+            for (int y = r[1] as int; y < (r[3] as int); y++)
+                Arrays.fill(field, y*w + (r[0] as int), y*w + (r[2] as int), true)
+        }
+        // Counted rather than multiplied out, so overlapping rectangles are not
+        // double counted in Percent_Open.
+        long fieldArea = field.count(true)
 
+        // Computed in both modes: the variance threshold needs it, and so does
+        // the wound-presence test below, which guards the classifier too.
+        float[] texture1 = textureMap(gray, w, h, cfg.varianceRadius as int, cfg.smoothSigma as double)
         boolean[] pass1
         double cut1 = Double.NaN
         if (cfg.inputMode == 'Pixel classifier') {
@@ -132,17 +148,32 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
                 cfg.woundClass as String, w, h, ds)
             for (int i=0; i<pass1.length; i++) pass1[i] = pass1[i] && field[i]
         } else {
-            float[] texture1 = gaussian(localVariance(gray, w, h, cfg.varianceRadius as int), w, h, cfg.smoothSigma as double)
             cut1 = otsu(texture1, field)
             pass1 = new boolean[w*h]
             for (int i=0; i<pass1.length; i++) pass1[i] = field[i] && texture1[i] <= cut1
-            texture1 = null
         }
         pass1 = morphology(pass1, w, h, cfg.closeIterations as int, cfg.openIterations as int)
 
         Map selected = largestComponent(pass1, w, h, (cfg.minArea / (dsX*dsY)) as int)
         pass1 = null
         boolean[] firstMask = selected == null ? new boolean[w*h] : selected.mask
+
+        // Otsu always returns a threshold, even on a closed sheet whose texture
+        // map has only one mode, so without this a fully healed wound still
+        // reports one. A real wound is bare substrate and so far smoother than
+        // the sheet around it; a slightly duller patch of sheet is not.
+        double ratio = (selected == null) ? Double.NaN
+                     : textureRatio(texture1, firstMask, field)
+        String detection = 'FOUND'
+        if (selected != null && !(ratio >= (cfg.minTextureRatio as double))) {
+            selected = null
+            firstMask = new boolean[w*h]
+            detection = 'REJECTED_LOW_CONTRAST'
+        } else if (selected == null) {
+            detection = 'NOT_FOUND'
+        }
+        texture1 = null
+
         // Cells and debris sitting in the gap read as high texture, so they
         // punch holes in the wound. Closing them recovers the true open area.
         long holesFilled = (selected != null && cfg.fillHoles) ? fillHoles(firstMask, w, h) : 0L
@@ -157,7 +188,7 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
             boolean[] searchBand = new boolean[w*h]
             for (int i=0; i<searchBand.length; i++) searchBand[i] = outer[i] && !inner[i] && field[i]
             outer = null
-            float[] texture2 = gaussian(localVariance(gray, w, h, cfg.refineVarianceRadius as int), w, h, cfg.refineSmoothSigma as double)
+            float[] texture2 = textureMap(gray, w, h, cfg.refineVarianceRadius as int, cfg.refineSmoothSigma as double)
             cut2 = otsu(texture2, searchBand)
             boolean[] refined = inner
             for (int i=0; i<refined.length; i++) if (searchBand[i] && texture2[i] <= cut2) refined[i] = true
@@ -179,9 +210,10 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
 
         Map m = measurements(finalMask, w, h, vertical)
         double areaPx = m.area * dsX * dsY
-        // Widths run across the scratch, so they scale with the axis they
-        // were measured along.
+        // Width runs across the scratch and length along it, so each scales
+        // with the axis it was measured on.
         double widthScale = vertical ? dsX : dsY
+        double lengthScale = vertical ? dsY : dsX
         def cal = server.getPixelCalibration()
         double pixelUm = cal.hasPixelSizeMicrons() ? cal.getAveragedPixelSizeMicrons() : Double.NaN
 
@@ -191,22 +223,66 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         if (cfg.saveMasks)
             ImageIO.write(maskImage(finalMask,w,h), 'PNG', maskDir.resolve(stem+'_wound_mask.png').toFile())
         if (cfg.saveQC)
-            ImageIO.write(qcImage(source, firstMask, finalMask, marginX, marginY), 'PNG', qcDir.resolve(stem+'_QC.png').toFile())
+            ImageIO.write(qcImage(source, firstMask, finalMask, fieldRects), 'PNG', qcDir.resolve(stem+'_QC.png').toFile())
+        if (cfg.saveProfiles)
+            writeWidthProfile(qcDir.resolve(stem+'_width_profile.csv'), entry.getImageName(),
+                vertical ? 'Vertical' : 'Horizontal', m.lines as List, dsX, dsY, widthScale, pixelUm,
+                cfg.profileStride as int)
 
         return [image:entry.getImageName(), orientation:vertical ? 'Vertical' : 'Horizontal', areaPx:areaPx,
                 areaUm2:Double.isNaN(pixelUm) ? Double.NaN : areaPx*pixelUm*pixelUm,
                 holesFilled:holesFilled*dsX*dsY,
-                percentOpen:100d*m.area/Math.max(1L, fieldArea),
+                percentOpen:100d*m.area/Math.max(1L, fieldArea), length:m.length*lengthScale,
                 meanWidth:m.meanWidth*widthScale, medianWidth:m.medianWidth*widthScale, widthSD:m.widthSD*widthScale,
                 widthSamples:m.samples, centroidX:m.cx*dsX, centroidY:m.cy*dsY,
-                threshold1:cut1, threshold2:cut2,
-                detection:selected == null ? 'NOT_FOUND' : 'FOUND', refinement:refineStatus]
+                // Reported in variance units, the quantity they describe,
+                // although the threshold is now chosen on its logarithm.
+                threshold1:Math.expm1(cut1), threshold2:Math.expm1(cut2),
+                textureRatio:ratio,
+                restricted:restricted ? 'YES' : 'NO',
+                fieldX:fieldRects.collect{it[0]}.min()*dsX, fieldY:fieldRects.collect{it[1]}.min()*dsY,
+                fieldW:(fieldRects.collect{it[2]}.max()-fieldRects.collect{it[0]}.min())*dsX,
+                fieldH:(fieldRects.collect{it[3]}.max()-fieldRects.collect{it[1]}.min())*dsY,
+                detection:detection, refinement:refineStatus]
     } finally {
         // Each readImageData() builds its own server and tile cache. Without
         // this the whole project stays in memory until the script ends.
         try { imageData.getServer().close() } catch (Exception ignored) {}
         try { imageData.close() } catch (Exception ignored) {}
     }
+}
+
+/**
+ * Analysis-field rectangles taken from annotations labelled "Restrict", in
+ * analysis pixels and clipped to the image. An annotation counts if either its
+ * classification or its name is "Restrict", case-insensitively, because QuPath
+ * offers both and either is a reasonable way to label one. Any ROI shape is
+ * accepted and its bounding box used. An empty list means the image carries no
+ * such annotation and the whole field should be analysed.
+ */
+List restrictRects(imageData, String image, int w, int h, double dsX, double dsY) {
+    def annotations = imageData.getHierarchy().getAnnotationObjects().findAll {
+        String cls = it.getPathClass() == null ? null : it.getPathClass().getName()
+        String name = it.getName()
+        'restrict'.equalsIgnoreCase(cls?.trim()) || 'restrict'.equalsIgnoreCase(name?.trim())
+    }
+    if (annotations.isEmpty()) return []
+    List rects = []
+    annotations.each { a ->
+        def roi = a.getROI()
+        if (roi == null) return
+        int x0 = Math.max(0, (int)Math.floor(roi.getBoundsX() / dsX))
+        int y0 = Math.max(0, (int)Math.floor(roi.getBoundsY() / dsY))
+        int x1 = Math.min(w, (int)Math.ceil((roi.getBoundsX() + roi.getBoundsWidth()) / dsX))
+        int y1 = Math.min(h, (int)Math.ceil((roi.getBoundsY() + roi.getBoundsHeight()) / dsY))
+        if (x1 > x0 && y1 > y0) rects << [x0, y0, x1, y1]
+    }
+    // Falling back to the whole image would silently measure something the user
+    // asked not to be measured, so say so instead.
+    if (rects.isEmpty())
+        throw new IllegalArgumentException(
+            "${image}: every 'Restrict' annotation falls outside the image or is empty at this downsample.")
+    rects
 }
 
 /**
@@ -247,9 +323,13 @@ Map buildSettingsDialog(project, List entries) {
     }
     // One row per project image: a tick to include it and its scratch
     // orientation. Positions match the caller's sorted entry list one for one.
+    // Spelled out, because "vertical" alone leaves it open whether it describes
+    // the scratch or the direction the width is measured in.
+    String vLabel = 'Vertical scratch (width measured left-right)'
+    String hLabel = 'Horizontal scratch (width measured top-bottom)'
     List picks = entries.collect { entry ->
         def tick = new CheckBox(entry.getImageName()); tick.selected = true
-        def orient = new ComboBox(); orient.items.addAll('Vertical', 'Horizontal'); orient.value = 'Vertical'
+        def orient = new ComboBox(); orient.items.addAll(vLabel, hLabel); orient.value = vLabel
         [tick:tick, orient:orient]
     }
     def pickGrid = new GridPane(hgap:12, vgap:3)
@@ -262,8 +342,8 @@ Map buildSettingsDialog(project, List entries) {
     }
     def toolbar = new HBox(6,
         bulk('All', { it.tick.selected = true }), bulk('None', { it.tick.selected = false }),
-        bulk('All vertical', { it.orient.value = 'Vertical' }),
-        bulk('All horizontal', { it.orient.value = 'Horizontal' }))
+        bulk('All vertical', { it.orient.value = vLabel }),
+        bulk('All horizontal', { it.orient.value = hLabel }))
     def pickScroll = new ScrollPane(pickGrid); pickScroll.fitToWidth = true; pickScroll.prefViewportHeight = 170
     def pickBox = new VBox(6, toolbar, pickScroll)
 
@@ -276,7 +356,9 @@ Map buildSettingsDialog(project, List entries) {
         refineBand:new TextField('20'),
         refineVarianceRadius:new TextField('3'), refineSmoothSigma:new TextField('1'),
         refineCloseIterations:new TextField('1'), refineOpenIterations:new TextField('0'),
-        saveMasks:new CheckBox(), saveQC:new CheckBox()
+        minTextureRatio:new TextField('2.5'),
+        saveMasks:new CheckBox(), saveQC:new CheckBox(), saveProfiles:new CheckBox(),
+        profileStride:new TextField('1')
     ]
     fields.inputMode.items.addAll('Variance threshold', 'Pixel classifier')
     fields.inputMode.value='Variance threshold'
@@ -284,13 +366,16 @@ Map buildSettingsDialog(project, List entries) {
     fields.classifierName.editable=true
     if (!classifierNames.empty) fields.classifierName.value=classifierNames[0]
     fields.fillHoles.selected=true
-    fields.secondPass.selected=true; fields.saveMasks.selected=true; fields.saveQC.selected=true
+    fields.secondPass.selected=true; fields.saveMasks.selected=true
+    fields.saveQC.selected=true; fields.saveProfiles.selected=true
     def labels=['Starting mask','Saved pixel classifier','Classifier wound class','Downsample','Analysis field (%)',
                 'Variance radius (analysis px)','Texture smoothing sigma',
                 'Minimum wound area (full-res px²)','Close iterations','Open iterations',
                 'Fill holes in wound','Enable second pass',
                 'Refinement band (full-res px)','Refinement variance radius','Refinement smoothing sigma',
-                'Refinement close iterations','Refinement open iterations','Save masks','Save QC overlays']
+                'Refinement close iterations','Refinement open iterations',
+                'Minimum sheet/wound texture ratio','Save masks','Save QC overlays',
+                'Save width profile CSVs','Width profile stride (every Nth line)']
     def grid=new GridPane(hgap:10,vgap:7,padding:new Insets(12))
     grid.add(new Label("Images to measure (${entries.size()}) and scratch orientation"),0,0)
     grid.add(pickBox,1,0)
@@ -305,7 +390,8 @@ Map buildSettingsDialog(project, List entries) {
     try {
         Map f=result.get()
         List selection=[]
-        picks.eachWithIndex { r,i -> if (r.tick.selected) selection << [index:i, orientation:r.orient.value] }
+        picks.eachWithIndex { r,i -> if (r.tick.selected)
+            selection << [index:i, orientation:isHorizontal(r.orient.value) ? 'Horizontal' : 'Vertical'] }
         Map c=[selection:selection,
                inputMode:f.inputMode.value, classifierName:(f.classifierName.editor.text ?: f.classifierName.value ?: '').trim(),
                woundClass:f.woundClass.text.trim(), downsample:positive(f.downsample.text,'Downsample'), analysisPercent:positive(f.analysisPercent.text,'Analysis field'),
@@ -317,7 +403,10 @@ Map buildSettingsDialog(project, List entries) {
                refineSmoothSigma:nonnegative(f.refineSmoothSigma.text,'Refinement smoothing'),
                refineCloseIterations:nonnegativeInt(f.refineCloseIterations.text,'Refinement close'),
                refineOpenIterations:nonnegativeInt(f.refineOpenIterations.text,'Refinement open'),
-               saveMasks:f.saveMasks.selected, saveQC:f.saveQC.selected]
+               minTextureRatio:nonnegative(f.minTextureRatio.text,'Minimum texture ratio'),
+               saveMasks:f.saveMasks.selected, saveQC:f.saveQC.selected,
+               saveProfiles:f.saveProfiles.selected,
+               profileStride:positiveInt(f.profileStride.text,'Profile stride')]
         if (c.analysisPercent > 100) throw new IllegalArgumentException('Analysis field must not exceed 100')
         if (c.inputMode == 'Pixel classifier' && !c.classifierName)
             throw new IllegalArgumentException('Choose or enter a saved pixel classifier')
@@ -371,8 +460,12 @@ boolean[] classifierMask(project, imageData, String classifierName, String wound
     }
 }
 
+/** Anything that does not announce itself as horizontal is treated as vertical. */
+boolean isHorizontal(Object label){ label != null && label.toString().toLowerCase().startsWith('horizontal') }
+
 double positive(String s,String n){ double v=Double.parseDouble(s); if(!(v>0))throw new IllegalArgumentException("$n must be > 0");v }
 double nonnegative(String s,String n){ double v=Double.parseDouble(s);if(v<0)throw new IllegalArgumentException("$n must be >= 0");v }
+int positiveInt(String s,String n){ int v=nonnegativeInt(s,n);if(v<1)throw new IllegalArgumentException("$n must be at least 1");v }
 int nonnegativeInt(String s,String n){ double v=nonnegative(s,n);if(v!=Math.rint(v))throw new IllegalArgumentException("$n must be an integer");v as int }
 
 float[] luminance(BufferedImage im) { int w=im.width,h=im.height; float[] a=new float[w*h]; for(int y=0;y<h;y++)for(int x=0;x<w;x++){int c=im.getRGB(x,y);a[y*w+x]=(float)(0.2126*((c>>16)&255)+0.7152*((c>>8)&255)+0.0722*(c&255))};a }
@@ -418,6 +511,45 @@ float[] gaussian(float[] src,int w,int h,double sigma) {
     float[] tmp=new float[src.length]
     for(int y=0;y<h;y++)for(int x=0;x<w;x++){double s=0;for(int j=-r;j<=r;j++)s+=src[y*w+Math.max(0,Math.min(w-1,x+j))]*k[j+r];tmp[y*w+x]=(float)s}
     for(int y=0;y<h;y++)for(int x=0;x<w;x++){double s=0;for(int j=-r;j<=r;j++)s+=tmp[Math.max(0,Math.min(h-1,y+j))*w+x]*k[j+r];src[y*w+x]=(float)s};src
+}
+
+/**
+ * Smoothed local variance, log transformed.
+ *
+ * Otsu assumes two compact classes. Raw local variance does not oblige: the
+ * wound forms a tight class near zero while the cell sheet's is broad and
+ * heavy-tailed, which drags the threshold far above the valley and swallows
+ * much of the sheet. The variance of a textured field is roughly chi-square
+ * distributed, so its logarithm is roughly Gaussian, which is the shape Otsu
+ * expects. On the synthetic benchmark this is the difference between
+ * misclassifying a third of the frame and misclassifying a twenty-fifth of it.
+ *
+ * Every threshold and comparison downstream is therefore in log units; the CSV
+ * converts back so the exported numbers stay in variance units.
+ */
+float[] textureMap(float[] gray,int w,int h,int radius,double sigma){
+    float[] t=gaussian(localVariance(gray,w,h,radius),w,h,sigma)
+    for(int i=0;i<t.length;i++) t[i]=(float)Math.log1p(t[i])
+    t
+}
+
+/**
+ * How many times more textured the analysis field is outside the proposed
+ * wound than inside it, or NaN when either side is empty - which is itself a
+ * rejection, since a mask covering the whole field cannot be a wound.
+ *
+ * Because the map is log(1+variance), the difference of the two means is a log
+ * ratio, so exponentiating gives a scale-free factor: bare substrate runs
+ * several times smoother than a cell sheet, a duller patch of sheet does not.
+ */
+double textureRatio(float[] texture,boolean[] mask,boolean[] field){
+    double inside=0, outside=0; long nIn=0, nOut=0
+    for(int i=0;i<texture.length;i++){
+        if(!field[i]) continue
+        if(mask[i]){ inside+=texture[i]; nIn++ } else { outside+=texture[i]; nOut++ }
+    }
+    if(nIn==0||nOut==0) return Double.NaN
+    Math.exp(outside/nOut - inside/nIn)
 }
 
 double otsu(float[] a,boolean[] use) {
@@ -546,23 +678,65 @@ long fillHoles(boolean[] mask,int w,int h){
  * in the pipeline uses square kernels and 4-connectivity, so nothing else in
  * the segmentation depends on the orientation.
  */
-Map measurements(boolean[] m,int w,int h,boolean vertical){long area=0,sx=0,sy=0;List widths=[]
-    for(int y=0;y<h;y++)for(int x=0;x<w;x++)if(m[y*w+x]){area++;sx+=x;sy+=y}
-    if(vertical){for(int y=0;y<h;y++){int first=-1,last=-1;for(int x=0;x<w;x++)if(m[y*w+x]){if(first<0)first=x;last=x};if(first>=0)widths<<last-first+1}}
-    else{for(int x=0;x<w;x++){int first=-1,last=-1;for(int y=0;y<h;y++)if(m[y*w+x]){if(first<0)first=y;last=y};if(first>=0)widths<<last-first+1}}
-    if(area==0)return [area:0,cx:Double.NaN,cy:Double.NaN,meanWidth:Double.NaN,medianWidth:Double.NaN,widthSD:Double.NaN,samples:0]
-    widths.sort();double mean=widths.sum()/(double)widths.size(),med=widths.size()%2?widths[widths.size()/2]:(widths[widths.size()/2-1]+widths[widths.size()/2])/2d
-    double sd=Math.sqrt(widths.collect{(it-mean)*(it-mean)}.sum()/widths.size());[area:area,cx:sx/(double)area,cy:sy/(double)area,meanWidth:mean,medianWidth:med,widthSD:sd,samples:widths.size()]}
+Map measurements(boolean[] m,int w,int h,boolean vertical){long area=0,sx=0,sy=0;List lines=[]
+    int minX=w,maxX=-1,minY=h,maxY=-1
+    for(int y=0;y<h;y++)for(int x=0;x<w;x++)if(m[y*w+x]){area++;sx+=x;sy+=y
+        if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y}
+    // Keep where each scan line entered and left the wound, as
+    // [startX,startY,endX,endY] in analysis pixels, so every width in the
+    // summary can be drawn back onto the image it came from.
+    if(vertical){for(int y=0;y<h;y++){int first=-1,last=-1;for(int x=0;x<w;x++)if(m[y*w+x]){if(first<0)first=x;last=x};if(first>=0)lines<<[first,y,last,y]}}
+    else{for(int x=0;x<w;x++){int first=-1,last=-1;for(int y=0;y<h;y++)if(m[y*w+x]){if(first<0)first=y;last=y};if(first>=0)lines<<[x,first,x,last]}}
+    if(area==0)return [area:0,cx:Double.NaN,cy:Double.NaN,length:Double.NaN,meanWidth:Double.NaN,medianWidth:Double.NaN,widthSD:Double.NaN,samples:0,lines:[]]
+    // Length runs along the scratch, width across it. Reporting both makes it
+    // obvious at a glance whether the orientation was set the right way round.
+    double length=vertical ? (maxY-minY+1) : (maxX-minX+1)
+    // One of the two deltas is always zero, so this is the run either way.
+    List widths=lines.collect{ (it[2]-it[0])+(it[3]-it[1])+1 }
+    List ranked=new ArrayList(widths); ranked.sort()
+    double mean=widths.sum()/(double)widths.size(),med=ranked.size()%2?ranked[ranked.size()/2]:(ranked[ranked.size()/2-1]+ranked[ranked.size()/2])/2d
+    double sd=Math.sqrt(widths.collect{(it-mean)*(it-mean)}.sum()/widths.size());[area:area,cx:sx/(double)area,cy:sy/(double)area,length:length,meanWidth:mean,medianWidth:med,widthSD:sd,samples:widths.size(),lines:lines]}
 
 void replaceGeneratedAnnotation(imageData,boolean[] mask,int w,int h,double dsX,double dsY){def hierarchy=imageData.getHierarchy();def cls=PathClassFactory.getPathClass('Scratch wound');def old=hierarchy.getAnnotationObjects().findAll{it.getPathClass()==cls};if(!old.empty)hierarchy.removeObjects(old,true)
     Area area=new Area();for(int y=0;y<h;y++){int start=-1;for(int x=0;x<=w;x++){boolean on=x<w&&mask[y*w+x];if(on&&start<0)start=x;if(!on&&start>=0){area.add(new Area(new Rectangle2D.Double(start*dsX,y*dsY,(x-start)*dsX,dsY)));start=-1}}}
     if(!area.isEmpty()){def roi=ROIs.createAreaROI(area,ImagePlane.getDefaultPlane());def obj=PathObjects.createAnnotationObject(roi,cls);obj.setName('Scratch wound (generated)');obj.getMeasurementList().put('Scratch assay generated',1d);hierarchy.addObject(obj)}}
 
 BufferedImage maskImage(boolean[] m,int w,int h){BufferedImage out=new BufferedImage(w,h,BufferedImage.TYPE_BYTE_GRAY);for(int y=0;y<h;y++)for(int x=0;x<w;x++)out.raster.setSample(x,y,0,m[y*w+x]?255:0);out}
-BufferedImage qcImage(BufferedImage source,boolean[] p1,boolean[] fin,int mx,int my){int w=source.width,h=source.height;BufferedImage out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB);Graphics2D g=out.createGraphics();g.drawImage(source,0,0,null);g.dispose();for(int y=1;y<h-1;y++)for(int x=1;x<w-1;x++){int i=y*w+x;if(boundary(p1,i,w)&&!boundary(fin,i,w))out.setRGB(x,y,0xFFFF00);if(boundary(fin,i,w))out.setRGB(x,y,0xFF0000)};for(int x=mx;x<w-mx;x++){out.setRGB(x,my,0x00FFFF);out.setRGB(x,h-my-1,0x00FFFF)};for(int y=my;y<h-my;y++){out.setRGB(mx,y,0x00FFFF);out.setRGB(w-mx-1,y,0x00FFFF)};out}
+BufferedImage qcImage(BufferedImage source,boolean[] p1,boolean[] fin,List rects){int w=source.width,h=source.height;BufferedImage out=new BufferedImage(w,h,BufferedImage.TYPE_INT_RGB);Graphics2D g=out.createGraphics();g.drawImage(source,0,0,null);g.dispose();for(int y=1;y<h-1;y++)for(int x=1;x<w-1;x++){int i=y*w+x;if(boundary(p1,i,w)&&!boundary(fin,i,w))out.setRGB(x,y,0xFFFF00);if(boundary(fin,i,w))out.setRGB(x,y,0xFF0000)};rects.each{r->int x0=r[0] as int,y0=r[1] as int,x1=(r[2] as int)-1,y1=(r[3] as int)-1
+    for(int x=x0;x<=x1;x++){out.setRGB(x,y0,0x00FFFF);out.setRGB(x,y1,0x00FFFF)}
+    for(int y=y0;y<=y1;y++){out.setRGB(x0,y,0x00FFFF);out.setRGB(x1,y,0x00FFFF)}};out}
 boolean boundary(boolean[] m,int i,int w){m[i]&&(!m[i-1]||!m[i+1]||!m[i-w]||!m[i+w])}
 
-void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=['Image','Orientation','Wound_Area_px2','Wound_Area_um2','Holes_Filled_px2','Percent_Open','Mean_Width_px','Median_Width_px','Width_SD_px','Width_Samples','Centroid_X_px','Centroid_Y_px','Pass1_Threshold','Pass2_Threshold','Detection_Status','Refinement_Status'];def keys=['image','orientation','areaPx','areaUm2','holesFilled','percentOpen','meanWidth','medianWidth','widthSD','widthSamples','centroidX','centroidY','threshold1','threshold2','detection','refinement'];List lines=[names.join(',')];rows.each{r->lines<<keys.collect{k->def v=r[k];v instanceof Number?(Double.isFinite(v as double)?d.format(v):'NA'):('"'+v.toString().replace('"','""')+'"')}.join(',')};Files.write(p,lines,StandardCharsets.UTF_8)}
+void writeCsv(Path p,List rows){def d=new DecimalFormat('0.######');List names=['Image','Orientation','Wound_Area_px2','Wound_Area_um2','Holes_Filled_px2','Percent_Open','Restricted','Field_X_px','Field_Y_px','Field_W_px','Field_H_px','Scratch_Length_px','Mean_Width_px','Median_Width_px','Width_SD_px','Width_Samples','Centroid_X_px','Centroid_Y_px','Pass1_Threshold','Pass2_Threshold','Sheet_Wound_Texture_Ratio','Detection_Status','Refinement_Status'];def keys=['image','orientation','areaPx','areaUm2','holesFilled','percentOpen','restricted','fieldX','fieldY','fieldW','fieldH','length','meanWidth','medianWidth','widthSD','widthSamples','centroidX','centroidY','threshold1','threshold2','textureRatio','detection','refinement'];List lines=[names.join(',')];rows.each{r->lines<<keys.collect{k->def v=r[k];v instanceof Number?(Double.isFinite(v as double)?d.format(v):'NA'):('"'+v.toString().replace('"','""')+'"')}.join(',')};Files.write(p,lines,StandardCharsets.UTF_8)}
+/**
+ * One row per scan line for a single image: where the line entered and left the
+ * wound, and how wide it was. This is the raw material behind Mean_Width_px and
+ * friends, so a measurement can be drawn back over the image that produced it.
+ * Coordinates are given both full resolution, matching the summary CSV and the
+ * QuPath annotation, and in analysis pixels, matching the QC and mask PNGs.
+ * A stride above 1 thins this file only; the summary statistics are always
+ * computed over every line.
+ */
+void writeWidthProfile(Path p,String image,String orientation,List lines,double dsX,double dsY,double widthScale,double pixelUm,int stride){
+    def d=new DecimalFormat('0.######')
+    List out=['Image,Orientation,Line_Index,Start_X_px,Start_Y_px,End_X_px,End_Y_px,Width_px,Width_um,' +
+              'Start_X_analysis_px,Start_Y_analysis_px,End_X_analysis_px,End_Y_analysis_px,Width_analysis_px']
+    String img='"'+image.replace('"','""')+'"',ori='"'+orientation+'"'
+    lines.eachWithIndex{ l,i ->
+        // Sampling thins the file only. Line_Index stays the true position of
+        // the line, so a strided profile still points at the right image rows.
+        if (i % stride != 0) return
+        int ax0=l[0] as int,ay0=l[1] as int,ax1=l[2] as int,ay1=l[3] as int
+        int wa=(ax1-ax0)+(ay1-ay0)+1
+        double wFull=wa*widthScale
+        out<<([img,ori,(i+1) as String,
+               d.format(ax0*dsX),d.format(ay0*dsY),d.format(ax1*dsX),d.format(ay1*dsY),
+               d.format(wFull),Double.isFinite(pixelUm)?d.format(wFull*pixelUm):'NA',
+               ax0 as String,ay0 as String,ax1 as String,ay1 as String,wa as String].join(','))
+    }
+    Files.write(p,out,StandardCharsets.UTF_8)
+}
+
 void writeSettings(Path p,String version,Map cfg,List order){List lines=["Scratch Assay Analyzer version=${version}","Generated=${ZonedDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX"))}"];cfg.each{k,v->lines<<"${k}=${v}"};lines<<'Images measured:';order.eachWithIndex{n,i->lines<<"${i+1}\t${n}"};Files.write(p,lines,StandardCharsets.UTF_8)}
 String safeStem(String n){n.replaceFirst(/\.[^.]+$/,'').replaceAll(/[^A-Za-z0-9._-]+/,'_')}
 int naturalCompare(String a,String b){def aa=a.toLowerCase().split(/(?<=\D)(?=\d)|(?<=\d)(?=\D)/),bb=b.toLowerCase().split(/(?<=\D)(?=\d)|(?<=\d)(?=\D)/);for(int i=0;i<Math.min(aa.length,bb.length);i++){int c=(aa[i]==~ /\d+/&&bb[i]==~ /\d+/)?new BigInteger(aa[i])<=>new BigInteger(bb[i]):aa[i]<=>bb[i];if(c)return c};aa.length<=>bb.length}

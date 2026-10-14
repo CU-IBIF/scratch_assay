@@ -44,9 +44,57 @@ assert "largestComponent" in text
 assert "fillHoles" in text
 # The image picker resolves by position, so duplicate image names stay distinct,
 # and each ticked image carries its own scratch orientation.
-assert "selection << [index:i, orientation:r.orient.value]" in text
+assert "selection << [index:i, orientation:isHorizontal(r.orient.value)" in text
 assert "Images to measure" in text
-assert "'Vertical', 'Horizontal'" in text
+assert "Vertical scratch (width measured left-right)" in text
+assert "Horizontal scratch (width measured top-bottom)" in text
+# One place decides what counts as horizontal.
+assert text.count("boolean isHorizontal(Object label)") == 1
+assert "boolean vertical = !isHorizontal(orientation)" in text
+# Length along the scratch and width across it are reported separately.
+assert "double lengthScale = vertical ? dsY : dsX" in text
+
+# Every width in the summary is traceable to the scan line that produced it.
+assert "writeWidthProfile" in text
+assert "_width_profile.csv" in text
+assert "lines<<[first,y,last,y]" in text and "lines<<[x,first,x,last]" in text
+# The profile lives in QC, so that folder must exist whenever either is written.
+assert "if (cfg.saveQC || cfg.saveProfiles) Files.createDirectories(qcDir)" in text
+# Stride thins the profile file only: the summary is always over every line.
+assert "profileStride" in text
+assert "if (i % stride != 0) return" in text
+assert "positiveInt(f.profileStride.text" in text
+
+# A "Restrict" annotation confines the analysis field; without one the whole
+# centred field is used. Matching is on classification or name, either case.
+assert "List restrictRects(imageData, String image, int w, int h, double dsX, double dsY)" in text
+assert "'restrict'.equalsIgnoreCase(cls?.trim()) || 'restrict'.equalsIgnoreCase(name?.trim())" in text
+# A Restrict that misses the image must fail loudly, never fall back to all of it.
+assert "outside the image" in text
+# Percent_Open must not double count overlapping rectangles.
+assert "long fieldArea = field.count(true)" in text
+# The QC overlay draws the field that was actually used.
+assert "BufferedImage qcImage(BufferedImage source,boolean[] p1,boolean[] fin,List rects)" in text
+
+# Otsu assumes two compact classes, which raw local variance is not: the
+# threshold must be chosen on the log of the variance map.
+assert "float[] textureMap(float[] gray,int w,int h,int radius,double sigma)" in text
+assert "Math.log1p" in text
+# Exactly one place builds the texture map, so both passes get the transform.
+assert text.count("gaussian(localVariance(") == 1
+assert text.count("textureMap(gray, w, h") == 2
+# Thresholds are exported in variance units even though chosen on the log.
+assert "threshold1:Math.expm1(cut1), threshold2:Math.expm1(cut2)" in text
+
+# Otsu always returns a cut, so a closed sheet needs an explicit presence test
+# or it reports a wound that is not there.
+assert "double textureRatio(float[] texture,boolean[] mask,boolean[] field)" in text
+assert "REJECTED_LOW_CONTRAST" in text
+assert "minTextureRatio" in text
+# A mask covering the whole field yields no outside, which must reject.
+assert "if(nIn==0||nOut==0) return Double.NaN" in text
+# NaN must fail the comparison rather than pass it, hence the negated form.
+assert "!(ratio >= (cfg.minTextureRatio as double))" in text
 
 # Width is measured across the scratch. Measuring the transposed axis is what
 # makes a horizontal scratch correct; it must not be reduced to one axis again.
@@ -70,7 +118,8 @@ for banned in ("selectComponent", "maxTrackShift", "frameInterval", "baselineAre
 # Protect the stable CSV contract relied on by downstream analysis.
 header = re.search(r"List names=\[(.*?)\];def keys", text, re.S).group(1)
 for required in ("Image", "Orientation", "Wound_Area_px2", "Holes_Filled_px2",
-                 "Percent_Open", "Detection_Status"):
+                 "Percent_Open", "Restricted", "Field_X_px", "Scratch_Length_px",
+                 "Sheet_Wound_Texture_Ratio", "Detection_Status"):
     assert f"'{required}'" in header
 # Image name is the key, so it must lead the row.
 assert header.startswith("'Image'")

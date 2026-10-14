@@ -49,25 +49,32 @@ orientation.
 For each image, independently:
 
 1. Read the image at a configurable downsample.
-2. Convert RGB to luminance and compute a local variance (texture) image.
-3. Create the initial wound mask either from the variance/Otsu workflow or from
+2. Convert RGB to luminance and compute a local variance (texture) image, log
+   transformed.
+3. Create the initial wound mask either from the texture/Otsu workflow or from
    a saved QuPath pixel classifier.
-4. Restrict analysis to a centered field of view and apply binary close/open.
+4. Restrict analysis to a `Restrict` annotation if the image has one, or to a
+   centered field of view otherwise, and apply binary close/open.
 5. Select the largest remaining component.
-6. Fill holes enclosed by that component.
-7. Optionally refine the boundary in a narrow second-pass variance band, then
+6. Check it is actually a wound: the sheet around it must be enough more
+   textured than the inside. Reject it if not.
+7. Fill holes enclosed by that component.
+8. Optionally refine the boundary in a narrow second-pass texture band, then
    fill holes again.
-8. Add the final wound as a QuPath annotation and save the image data.
-9. Record the row, then release the image server before moving on.
+9. Add the final wound as a QuPath annotation and save the image data.
+10. Record the row, then release the image server before moving on.
 
 The output is written below the project directory:
 
 ```text
 Scratch_Assay_Results/
-  Scratch_Assay_Measurements.csv
+  Scratch_Assay_Measurements.csv     one row per image
   Scratch_Assay_Settings.txt
   Masks/
+    <image>_wound_mask.png
   QC/
+    <image>_QC.png
+    <image>_width_profile.csv        one row per measured line
 ```
 
 Areas and lengths are exported in both analysis pixels and calibrated units
@@ -79,17 +86,65 @@ the class **Scratch wound** and are replaced on a subsequent run.
 same image, so it is comparable across images without a baseline frame.
 `Detection_Status` is `FOUND` or `NOT_FOUND`; a `NOT_FOUND` row reports a zero
 area and is worth inspecting in the QC overlay before use.
+`Sheet_Wound_Texture_Ratio` is how many times more textured the analysis field
+is outside the wound than inside it - the number the wound-presence test acts
+on. `Detection_Status` is `FOUND`, `NOT_FOUND`, or `REJECTED_LOW_CONTRAST` when
+a candidate was found but was not smooth enough to be bare substrate.
 `Holes_Filled_px2` reports how much of the wound area came from the fill-holes
 step, which is a useful sanity check: a large value means a lot of the gap was
 occupied by cells or debris. `Orientation` records what the image was measured
-as.
+as, and `Scratch_Length_px` the wound's extent along the scratch, so the width
+and length columns can always be told apart.
+
+### Restricting analysis to part of the image
+
+To measure only part of a scratch, draw a **rectangle** on the image in QuPath
+and label it `Restrict` - either give the annotation that *name*, or that
+*classification*; the script accepts either, ignoring case. Images without one
+are analysed as before, so this is opt-in per image and needs no setting.
+
+A `Restrict` annotation **replaces** the centred **Analysis field (%)** rather
+than intersecting with it: it is an explicit instruction about where to look,
+and intersecting would quietly trim what you drew. `Percent_Open` is then
+relative to the restricted region, which is usually what you want - it is the
+fraction of *the region you chose* that is still open.
+
+Any ROI shape is accepted and its bounding box used, so a rectangle is simply
+the case where the box is the shape. The box is rounded outwards to whole
+analysis pixels, so nothing you drew is lost to the downsample. A `Restrict`
+annotation that falls entirely outside the image is an error rather than a
+silent whole-image run.
+
+Several `Restrict` annotations on one image are unioned into a single analysis
+field, and the image still produces one CSV row. Note that the script keeps a
+single connected component, so if you draw regions on genuinely separate
+wounds only the largest survives - use one region per image for that, or ask
+for per-region rows.
+
+`Restricted` in the summary CSV is `YES` or `NO`, and `Field_X_px`,
+`Field_Y_px`, `Field_W_px`, `Field_H_px` give the bounding box of the field
+that was used, so every row records where it was measured. The QC overlay
+draws that field in cyan, as it always has.
+
+Generated wound annotations are removed and rewritten on each run, but they
+are matched by the **Scratch wound** classification, so your `Restrict`
+rectangles are never touched.
 
 ### Scratch orientation
 
-Width is always measured *across* the scratch: the horizontal run in each row
-for a vertical scratch, the vertical run in each column for a horizontal one.
-Getting this wrong does not fail loudly - it silently reports the scratch's
-length instead of its width - so set the dropdown to match each image.
+The dropdown describes **the scratch**, not the direction the width is
+measured in:
+
+- *Vertical scratch (width measured left-right)* - the gap runs top to bottom,
+  so its width is the horizontal run in each row.
+- *Horizontal scratch (width measured top-bottom)* - the gap runs left to
+  right, so its width is the vertical run in each column.
+
+`Scratch_Length_px` is reported next to the width columns, measured along the
+opposite axis. For a real scratch the length should be much larger than the
+width, and it should run the way the image looks. If `Scratch_Length_px` is the
+small number and `Mean_Width_px` is close to the image dimension, the dropdown
+is set the wrong way round for that image.
 
 Nothing else in the pipeline depends on orientation. The variance and Gaussian
 kernels are square, morphology uses square structuring elements, and component
@@ -99,6 +154,43 @@ rotating the image and measuring rows, and it avoids allocating a second copy
 of the image and rotating the mask back for the annotation and QC overlay.
 Area, `Percent_Open`, the centroid and the QC images are all reported in the
 original image frame either way.
+
+### Width profiles
+
+`Mean_Width_px` and friends summarise one measurement per scan line. The
+per-image `QC/<image>_width_profile.csv` writes those measurements out
+individually, so a reported width can be traced back to the pixels it came
+from - and drawn over the image to show where it was taken.
+
+| Column | Meaning |
+|---|---|
+| `Image`, `Orientation` | Repeated on every row so profiles concatenate cleanly |
+| `Line_Index` | Position of the scan line, in scan order |
+| `Start_X_px`, `Start_Y_px` | Where the line entered the wound, full resolution |
+| `End_X_px`, `End_Y_px` | Where it left |
+| `Width_px`, `Width_um` | The measured width; `Width_um` is `NA` when uncalibrated |
+| `Start_X_analysis_px` … `Width_analysis_px` | The same in analysis pixels |
+
+Full-resolution coordinates line up with the summary CSV and the QuPath
+annotation; the analysis-pixel columns line up with the QC and mask PNGs, so
+the lines can be drawn straight onto either. For a vertical scratch each row
+is one image row and the start/end points differ only in x; for a horizontal
+one it is the other way round.
+
+At the default stride of 1 the mean of `Width_analysis_px` reproduces
+`Mean_Width_px` exactly - the profile is the summary's own input, not a
+recomputation. An image where no wound was found writes a header-only file.
+
+A vertical scratch in a 2400-pixel-tall image gives 2400 rows. **Width profile
+stride** writes every Nth line instead: a stride of 10 keeps a tenth of them.
+`Line_Index` still records each line's true position, so a thinned profile
+plots in the right place. The stride thins the file *only* - `Mean_Width_px`,
+the median and the SD are always computed over every line, so changing it never
+changes a measurement. At a stride above 1 the profile is a sample of the
+summary rather than a reproduction of it.
+
+Turn the file off entirely with **Save width profile CSVs**; it is independent
+of the QC overlays, which are the memory-hungry output.
 
 ### Fill holes
 
@@ -124,15 +216,18 @@ what it changed.
 | Saved pixel classifier | Project classifier evaluated for every image |
 | Classifier wound class | Exact classifier output class to treat as wound (case-insensitive) |
 | Downsample | Scale used to read images; larger values save memory |
-| Analysis field (%) | Centered width and height included in analysis |
+| Analysis field (%) | Centered width and height included in analysis, when the image has no `Restrict` annotation |
 | Variance radius | Neighborhood radius for the first texture map |
 | Texture smoothing | Gaussian sigma applied to that map |
 | Minimum wound area | Reject a smaller wound (full-resolution pixels²) |
 | Close/open iterations | Radius-1 binary morphology passes |
 | Fill holes in wound | Close background regions fully enclosed by the wound |
 | Second pass | Reclassify a band around the first boundary with a finer texture map |
+| Minimum sheet/wound texture ratio | Reject a wound unless the sheet around it is this many times more textured; 0 disables the check |
 | Save masks | Write a binary mask PNG per image |
 | Save QC overlays | Write a QC overlay PNG per image |
+| Save width profile CSVs | Write the measured lines to `QC/<image>_width_profile.csv` |
+| Width profile stride | Write every Nth line to that file; does not affect any measurement |
 
 ### Using a trained QuPath pixel classifier
 
@@ -168,6 +263,87 @@ If you hit that message, in rough order of effect:
 - reduce the **Analysis field (%)**;
 - give QuPath more memory under **Edit > Preferences > Memory**.
 
+## Synthetic benchmark
+
+`benchmark/` generates a phase-contrast scratch assay time series with **exact
+ground truth** and scores a run against it, so the analyzer can be checked
+against known answers rather than by eye:
+
+```bash
+python3 benchmark/generate_synthetic.py --out benchmark/dataset
+# import benchmark/dataset/images into a QuPath project, run the analyzer
+python3 benchmark/score_against_truth.py \
+    --measured .../Scratch_Assay_Results/Scratch_Assay_Measurements.csv
+```
+
+The images model phase contrast properly - halo, shade-off, and a cell sheet
+told apart from bare substrate by *texture* rather than brightness - so they
+exercise the same cue the analyzer thresholds. Seven series cover fast and slow
+closure, a no-migration control, a narrow wound, a rotated wound, debris in the
+gap, and heavy uneven illumination. See `benchmark/README.md` for the imaging
+model, the ground-truth columns, and the settings to use.
+
+It has already earned its keep: see **Known limitations** below.
+
+## Segmentation notes
+
+Measured against the synthetic benchmark, where the true wound is known exactly:
+
+### Thresholding
+
+The segmentation thresholds the **logarithm** of the local variance, not the
+variance itself. Otsu assumes two compact classes; raw variance gives it a
+tight class near zero for the wound and a broad, heavy-tailed one for the cell
+sheet, which drags the threshold far above the valley and swallows much of the
+sheet. The variance of a textured field is roughly chi-square distributed, so
+its log is roughly Gaussian, which is the shape Otsu expects. On the synthetic
+benchmark this is the difference between measuring a wound almost the width of
+the frame and measuring it to within a few percent.
+
+`Pass1_Threshold` and `Pass2_Threshold` are still reported in variance units,
+so they mean what they always meant, even though the cut is now chosen on the
+log.
+
+### Wound presence
+
+Otsu returns a threshold whatever it is given, including a closed sheet whose
+texture map has only one mode, so on its own it will always find a "wound".
+Each candidate therefore has to earn the name: the analysis field outside it
+must be at least **Minimum sheet/wound texture ratio** times more textured than
+the inside. Bare substrate runs several times smoother than a cell sheet; a
+slightly duller patch of sheet does not. A candidate that fails is reported as
+`REJECTED_LOW_CONTRAST` with zero area, and the measured ratio is exported on
+every row so the threshold can be tuned to your imagery.
+
+A mask covering the entire analysis field leaves no outside to compare against,
+and is rejected for the same reason.
+
+### Remaining limitations
+
+Measured against the synthetic benchmark, where the true wound is known exactly.
+At default settings four of its seven series are measured to within 2.3%,
+including one with heavy uneven illumination and one with debris in the gap.
+What is left:
+
+- **There is a resolution floor of roughly three cell diameters.** The variance
+  radius has to span a cell to describe the sheet's texture, which means it
+  cannot resolve a gap much narrower than its own support. Below that the
+  wound's interior reads as contaminated sheet, the texture ratio collapses,
+  and the presence test rejects the frame. Shrinking the radius does not help -
+  it destroys the sheet contrast instead. A real scratch starts 15-25 cell
+  diameters wide, so this is reached only near full closure.
+- **The second pass and the halo bias in opposite directions.** A texture
+  threshold sits slightly inside the true edge, because the halo is a steep
+  gradient and the boundary pixels read as sheet; the second pass pulls outward,
+  because the halo itself is smooth and reads as wound. On the benchmark these
+  roughly cancel at the default **Refinement band** of 20, which is why the
+  defaults beat turning the second pass off. That cancellation depends on the
+  halo width and so on your optics - re-run the benchmark if you change them,
+  rather than assuming it still holds.
+- **Area and length depend on the analysis field, width does not.** A 90% field
+  removes 10% of the scan lines and so 10% of the area and length. Use a 100%
+  field, or a `Restrict` region, when those columns matter.
+
 ## Validation notes
 
 Segmentation is deterministic for a given QuPath image server and parameter
@@ -183,6 +359,7 @@ Run the repository checks without launching QuPath:
 
 ```bash
 python3 tests/test_script_contract.py
+python3 tests/test_benchmark.py
 ```
 
 The contract test verifies required exports, the CSV contract, memory hygiene,
