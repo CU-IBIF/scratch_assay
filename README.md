@@ -15,8 +15,16 @@ joined to whatever experimental design you keep elsewhere.
 - A QuPath project containing the images to measure
 - Java 17 or newer (included with normal QuPath distributions)
 
-No ImageJ or third-party QuPath extension is required. The original ImageJ
-macros are retained as reference implementations.
+No ImageJ or third-party QuPath extension is required for the analyzer.
+`Scratch_Assay_Analyzer.ijm` is retained as the reference implementation it was
+ported from.
+
+`BaSiC_Batch_Tile_Stitcher_v1.3.ijm` is a separate Fiji preprocessing macro:
+it flat-field corrects tiles with BaSiC and stitches them into one image per
+well. Point it at a parent folder of `TimePoint_1 ... TimePoint_n` subfolders
+and tick which to process, or at a single folder of tiles as before. Each time
+point is corrected on its own tiles, so illumination drift between
+acquisitions is not blurred into one shared shading profile.
 
 ## Install
 
@@ -227,6 +235,7 @@ what it changed.
 | Save masks | Write a binary mask PNG per image |
 | Save QC overlays | Write a QC overlay PNG per image |
 | Save width profile CSVs | Write the measured lines to `QC/<image>_width_profile.csv` |
+| Save per-step debug images | Write every intermediate image to `Debug/`, for working out why a hard image failed |
 | Width profile stride | Write every Nth line to that file; does not affect any measurement |
 
 ### Using a trained QuPath pixel classifier
@@ -318,6 +327,39 @@ every row so the threshold can be tuned to your imagery.
 A mask covering the entire analysis field leaves no outside to compare against,
 and is rejected for the same reason.
 
+### Working out why an image failed
+
+Turn on **Save per-step debug images** and every stage writes a numbered PNG to
+`Scratch_Assay_Results/Debug/`, plus `<image>_debug.txt` recording the
+thresholds, pixel counts and decisions:
+
+| File | What it shows |
+|---|---|
+| `01_source` | the image as read, at the analysis downsample |
+| `02_field` | the analysis field, from the percentage or a `Restrict` annotation |
+| `03_texture` | the log-variance map the threshold is chosen on |
+| `04_initial_mask` | the thresholded mask, or the classifier's output |
+| `05_morphology` | after close/open |
+| `06_largest_component` | the component that was kept |
+| `07_discarded` | **everything the component choice threw away** |
+| `08_holes_filled` | after fill holes |
+| `09_refine_band`, `10_refine_texture`, `11_refined` | the second pass |
+| `12_final` | the mask that was measured |
+
+With a lot of debris, `07_discarded` is usually the one that answers it. Debris
+scattered through the gap breaks the wound into pieces, and only the largest
+survives; if `07_discarded` holds most of the wound, the fix is a larger
+**Close iterations** to bridge the debris before the component is chosen, not a
+different threshold. The report's pixel counts show which step lost the area,
+and the texture ratio shows whether the presence test rejected it.
+
+Each `03_texture` and `10_refine_texture` note in the report gives the
+log-variance range that grey 0..255 spans, so the picture can be related back
+to the threshold.
+
+The dump is off by default, costs roughly a dozen PNGs per image, and changes
+nothing about what is measured.
+
 ### Remaining limitations
 
 Measured against the synthetic benchmark, where the true wound is known exactly.
@@ -360,6 +402,15 @@ Run the repository checks without launching QuPath:
 ```bash
 python3 tests/test_script_contract.py
 python3 tests/test_benchmark.py
+python3 tests/test_basic_stitcher.py
+```
+
+`test_basic_stitcher.py` also runs the stitcher macro's helper functions
+through ImageJ's own interpreter when one is available, which is the only way
+to settle how the macro language really behaves:
+
+```bash
+IJ_JAR=/path/to/Fiji.app/jars/ij-1.54j.jar python3 tests/test_basic_stitcher.py
 ```
 
 The contract test verifies required exports, the CSV contract, memory hygiene,

@@ -96,6 +96,22 @@ assert "if(nIn==0||nOut==0) return Double.NaN" in text
 # NaN must fail the comparison rather than pass it, hence the negated form.
 assert "!(ratio >= (cfg.minTextureRatio as double))" in text
 
+# Every pipeline step can be dumped for inspection, and the dump must be
+# purely additive: guarded by the flag, never changing what is measured.
+assert "void debugMask(Map cfg,Path dir,String stem,String step,boolean[] m,int w,int h)" in text
+assert "String debugMap(" in text and "void debugImage(" in text
+assert text.count("if (!cfg.saveDebug) return") == 3
+assert "_debug.txt" in text
+# A texture map has no natural display range, so the scaling has to be recorded.
+assert "grey 0..255 spans log-variance" in text
+# A flat or empty map must not divide by zero when being scaled.
+assert "if(!Double.isFinite(mn)||!(mx>mn)){ mn=0d; mx=1d }" in text
+# What the component choice threw away is the point of the dump with debris.
+assert "07_discarded" in text
+assert "boolean[] morphMask = cfg.saveDebug ? pass1 : null" in text
+# Debug images cost memory too, so the budget has to know about them.
+assert "(cfg.saveDebug ? px * 6L : 0L)" in text
+
 # Width is measured across the scratch. Measuring the transposed axis is what
 # makes a horizontal scratch correct; it must not be reduced to one axis again.
 assert "Map measurements(boolean[] m,int w,int h,boolean vertical)" in text
