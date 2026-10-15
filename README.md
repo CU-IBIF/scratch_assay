@@ -15,8 +15,16 @@ joined to whatever experimental design you keep elsewhere.
 - A QuPath project containing the images to measure
 - Java 17 or newer (included with normal QuPath distributions)
 
-No ImageJ or third-party QuPath extension is required. The original ImageJ
-macros are retained as reference implementations.
+No ImageJ or third-party QuPath extension is required for the analyzer.
+`Scratch_Assay_Analyzer.ijm` is retained as the reference implementation it was
+ported from.
+
+`BaSiC_Batch_Tile_Stitcher_v1.3.ijm` is a separate Fiji preprocessing macro:
+it flat-field corrects tiles with BaSiC and stitches them into one image per
+well. Point it at a parent folder of `TimePoint_1 ... TimePoint_n` subfolders
+and tick which to process, or at a single folder of tiles as before. Each time
+point is corrected on its own tiles, so illumination drift between
+acquisitions is not blurred into one shared shading profile.
 
 ## Install
 
@@ -360,6 +368,15 @@ Run the repository checks without launching QuPath:
 ```bash
 python3 tests/test_script_contract.py
 python3 tests/test_benchmark.py
+python3 tests/test_basic_stitcher.py
+```
+
+`test_basic_stitcher.py` also runs the stitcher macro's helper functions
+through ImageJ's own interpreter when one is available, which is the only way
+to settle how the macro language really behaves:
+
+```bash
+IJ_JAR=/path/to/Fiji.app/jars/ij-1.54j.jar python3 tests/test_basic_stitcher.py
 ```
 
 The contract test verifies required exports, the CSV contract, memory hygiene,
