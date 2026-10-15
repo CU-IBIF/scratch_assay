@@ -75,15 +75,17 @@ if (jobs.isEmpty()) {
 Path output = Path.of(project.getPath().getParent().toString(), 'Scratch_Assay_Results')
 Path qcDir = output.resolve('QC')
 Path maskDir = output.resolve('Masks')
+Path debugDir = output.resolve('Debug')
 Files.createDirectories(output)
 if (cfg.saveQC || cfg.saveProfiles) Files.createDirectories(qcDir)
 if (cfg.saveMasks) Files.createDirectories(maskDir)
+if (cfg.saveDebug) Files.createDirectories(debugDir)
 
 List rows = []
 jobs.eachWithIndex { job, i ->
     // Each image is analysed in its own method call so that every large array
     // it allocates becomes unreachable as soon as the call returns.
-    rows << analyseImage(project, job.entry, job.orientation as String, cfg, maskDir, qcDir)
+    rows << analyseImage(project, job.entry, job.orientation as String, cfg, maskDir, qcDir, debugDir)
     println "Scratch assay ${i+1}/${jobs.size()}: ${job.entry.getImageName()} " +
             "[${rows[-1].orientation}] (${rows[-1].areaPx} px2)"
 }
@@ -97,7 +99,7 @@ Dialogs.showInfoNotification('Scratch Assay Analyzer', "Measured ${jobs.size()} 
  * Measure a single image. Nothing carries over between images: the returned
  * map is the complete result for this entry.
  */
-Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path qcDir) {
+Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path qcDir, Path debugDir) {
     boolean vertical = !isHorizontal(orientation)
     def imageData = entry.readImageData()
     try {
@@ -138,9 +140,27 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         // double counted in Percent_Open.
         long fieldArea = field.count(true)
 
+        // When debugging, every step writes a PNG and a line in a report, so a
+        // run that loses the wound can be traced to the step that lost it.
+        String stem = safeStem(entry.getImageName())
+        List dbg = []
+        if (cfg.saveDebug) {
+            dbg << 'image: ' + entry.getImageName()
+            dbg << 'orientation: ' + (vertical ? 'Vertical' : 'Horizontal')
+            dbg << 'analysis grid: ' + w + ' x ' + h +
+                   '  (full-res scale dsX=' + dsX + ', dsY=' + dsY + ')'
+            dbg << 'starting mask: ' + cfg.inputMode
+            dbg << 'analysis field: ' + fieldArea + ' px' +
+                   (restricted ? ' (Restrict annotation)' : ' (centred ' + cfg.analysisPercent + '%)')
+        }
+        debugImage(cfg, debugDir, stem, '01_source', source)
+        debugMask(cfg, debugDir, stem, '02_field', field, w, h)
+
         // Computed in both modes: the variance threshold needs it, and so does
         // the wound-presence test below, which guards the classifier too.
         float[] texture1 = textureMap(gray, w, h, cfg.varianceRadius as int, cfg.smoothSigma as double)
+        if (cfg.saveDebug)
+            dbg << debugMap(cfg, debugDir, stem, '03_texture', texture1, w, h, field)
         boolean[] pass1
         double cut1 = Double.NaN
         if (cfg.inputMode == 'Pixel classifier') {
@@ -152,11 +172,39 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
             pass1 = new boolean[w*h]
             for (int i=0; i<pass1.length; i++) pass1[i] = field[i] && texture1[i] <= cut1
         }
+        debugMask(cfg, debugDir, stem, '04_initial_mask', pass1, w, h)
+        if (cfg.saveDebug) {
+            dbg << 'pass 1 threshold: ' + (Double.isFinite(cut1)
+                   ? ('variance ' + Math.expm1(cut1) + ', log ' + cut1)
+                   : 'n/a (classifier)')
+            dbg << '04_initial_mask: ' + pass1.count(true) + ' px'
+        }
         pass1 = morphology(pass1, w, h, cfg.closeIterations as int, cfg.openIterations as int)
+        debugMask(cfg, debugDir, stem, '05_morphology', pass1, w, h)
+        if (cfg.saveDebug)
+            dbg << '05_morphology (close ' + cfg.closeIterations + ', open ' +
+                   cfg.openIterations + '): ' + pass1.count(true) + ' px'
 
-        Map selected = largestComponent(pass1, w, h, (cfg.minArea / (dsX*dsY)) as int)
+        int minAreaPx = (cfg.minArea / (dsX*dsY)) as int
+        Map selected = largestComponent(pass1, w, h, minAreaPx)
+        // Held only for the debug image of what was discarded, so that debris
+        // breaking the wound into pieces is visible rather than inferred.
+        boolean[] morphMask = cfg.saveDebug ? pass1 : null
         pass1 = null
         boolean[] firstMask = selected == null ? new boolean[w*h] : selected.mask
+        debugMask(cfg, debugDir, stem, '06_largest_component', firstMask, w, h)
+        if (cfg.saveDebug) {
+            dbg << 'minimum area: ' + minAreaPx + ' analysis px (' + cfg.minArea + ' full-res px2)'
+            dbg << '06_largest_component: ' + (selected == null
+                   ? 'none passed the minimum area' : selected.area + ' px')
+            boolean[] dropped = new boolean[w*h]
+            for (int i=0; i<dropped.length; i++) dropped[i] = morphMask[i] && !firstMask[i]
+            debugMask(cfg, debugDir, stem, '07_discarded', dropped, w, h)
+            dbg << '07_discarded (everything the component choice dropped): ' +
+                   dropped.count(true) + ' px'
+            dropped = null
+            morphMask = null
+        }
 
         // Otsu always returns a threshold, even on a closed sheet whose texture
         // map has only one mode, so without this a fully healed wound still
@@ -172,11 +220,20 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         } else if (selected == null) {
             detection = 'NOT_FOUND'
         }
+        if (cfg.saveDebug) {
+            dbg << 'sheet/wound texture ratio: ' + ratio +
+                   ' (minimum ' + cfg.minTextureRatio + ')'
+            dbg << 'detection: ' + detection
+        }
         texture1 = null
 
         // Cells and debris sitting in the gap read as high texture, so they
         // punch holes in the wound. Closing them recovers the true open area.
         long holesFilled = (selected != null && cfg.fillHoles) ? fillHoles(firstMask, w, h) : 0L
+        debugMask(cfg, debugDir, stem, '08_holes_filled', firstMask, w, h)
+        if (cfg.saveDebug)
+            dbg << '08_holes_filled: ' + firstMask.count(true) + ' px (' +
+                   holesFilled + ' px added)'
         boolean[] finalMask = firstMask
         double cut2 = Double.NaN
         String refineStatus = cfg.secondPass ? 'NO_COMPONENT' : 'DISABLED'
@@ -188,12 +245,19 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
             boolean[] searchBand = new boolean[w*h]
             for (int i=0; i<searchBand.length; i++) searchBand[i] = outer[i] && !inner[i] && field[i]
             outer = null
+            debugMask(cfg, debugDir, stem, '09_refine_band', searchBand, w, h)
             float[] texture2 = textureMap(gray, w, h, cfg.refineVarianceRadius as int, cfg.refineSmoothSigma as double)
+            if (cfg.saveDebug)
+                dbg << debugMap(cfg, debugDir, stem, '10_refine_texture', texture2, w, h, searchBand)
             cut2 = otsu(texture2, searchBand)
             boolean[] refined = inner
             for (int i=0; i<refined.length; i++) if (searchBand[i] && texture2[i] <= cut2) refined[i] = true
             texture2 = null; searchBand = null
             refined = morphology(refined, w, h, cfg.refineCloseIterations as int, cfg.refineOpenIterations as int)
+            debugMask(cfg, debugDir, stem, '11_refined', refined, w, h)
+            if (cfg.saveDebug)
+                dbg << '11_refined (band ' + band + ' analysis px, threshold variance ' +
+                       Math.expm1(cut2) + '): ' + refined.count(true) + ' px'
             Map best = largestComponent(refined, w, h, 1)
             refined = null
             if (best != null) {
@@ -208,6 +272,8 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         gray = null
         field = null
 
+        debugMask(cfg, debugDir, stem, '12_final', finalMask, w, h)
+
         Map m = measurements(finalMask, w, h, vertical)
         double areaPx = m.area * dsX * dsY
         // Width runs across the scratch and length along it, so each scales
@@ -217,9 +283,16 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         def cal = server.getPixelCalibration()
         double pixelUm = cal.hasPixelSizeMicrons() ? cal.getAveragedPixelSizeMicrons() : Double.NaN
 
+        if (cfg.saveDebug) {
+            dbg << 'refinement: ' + refineStatus
+            dbg << '12_final: ' + m.area + ' analysis px'
+            dbg << 'reported width: mean ' + (m.meanWidth*widthScale) +
+                   ' full-res px, from ' + m.samples + ' scan lines'
+            Files.write(debugDir.resolve(stem + '_debug.txt'), dbg, StandardCharsets.UTF_8)
+        }
+
         replaceGeneratedAnnotation(imageData, finalMask, w, h, dsX, dsY)
         entry.saveImageData(imageData)
-        String stem = safeStem(entry.getImageName())
         if (cfg.saveMasks)
             ImageIO.write(maskImage(finalMask,w,h), 'PNG', maskDir.resolve(stem+'_wound_mask.png').toFile())
         if (cfg.saveQC)
@@ -293,6 +366,7 @@ List restrictRects(imageData, String image, int w, int h, double dsX, double dsY
 void checkMemoryBudget(String name, int w, int h, Map cfg) {
     long px = (long)w * h
     long bytes = px * (cfg.secondPass ? 44L : 32L) + (cfg.saveQC ? px * 4L : 0L)
+               + (cfg.saveDebug ? px * 6L : 0L)
     long budget = (long)(Runtime.getRuntime().maxMemory() * 0.6d)
     if (bytes > budget)
         throw new IllegalArgumentException(
@@ -358,7 +432,7 @@ Map buildSettingsDialog(project, List entries) {
         refineCloseIterations:new TextField('1'), refineOpenIterations:new TextField('0'),
         minTextureRatio:new TextField('2.5'),
         saveMasks:new CheckBox(), saveQC:new CheckBox(), saveProfiles:new CheckBox(),
-        profileStride:new TextField('1')
+        profileStride:new TextField('1'), saveDebug:new CheckBox()
     ]
     fields.inputMode.items.addAll('Variance threshold', 'Pixel classifier')
     fields.inputMode.value='Variance threshold'
@@ -375,7 +449,8 @@ Map buildSettingsDialog(project, List entries) {
                 'Refinement band (full-res px)','Refinement variance radius','Refinement smoothing sigma',
                 'Refinement close iterations','Refinement open iterations',
                 'Minimum sheet/wound texture ratio','Save masks','Save QC overlays',
-                'Save width profile CSVs','Width profile stride (every Nth line)']
+                'Save width profile CSVs','Width profile stride (every Nth line)',
+                'Save per-step debug images']
     def grid=new GridPane(hgap:10,vgap:7,padding:new Insets(12))
     grid.add(new Label("Images to measure (${entries.size()}) and scratch orientation"),0,0)
     grid.add(pickBox,1,0)
@@ -406,7 +481,8 @@ Map buildSettingsDialog(project, List entries) {
                minTextureRatio:nonnegative(f.minTextureRatio.text,'Minimum texture ratio'),
                saveMasks:f.saveMasks.selected, saveQC:f.saveQC.selected,
                saveProfiles:f.saveProfiles.selected,
-               profileStride:positiveInt(f.profileStride.text,'Profile stride')]
+               profileStride:positiveInt(f.profileStride.text,'Profile stride'),
+               saveDebug:f.saveDebug.selected]
         if (c.analysisPercent > 100) throw new IllegalArgumentException('Analysis field must not exceed 100')
         if (c.inputMode == 'Pixel classifier' && !c.classifierName)
             throw new IllegalArgumentException('Choose or enter a saved pixel classifier')
@@ -641,6 +717,44 @@ Map largestComponent(boolean[] mask,int w,int h,int minimum){
     boolean[] own=new boolean[mask.length]
     long[] stats=flood(mask,seen,queue,w,h,bestSeed,own)
     [mask:own,area:stats[0],cx:stats[1]/(double)stats[0],cy:stats[2]/(double)stats[0]]
+}
+
+/**
+ * Write a mask as a numbered debug PNG, or do nothing when debugging is off.
+ * The flag is checked here so the call sites stay one line each.
+ */
+void debugMask(Map cfg,Path dir,String stem,String step,boolean[] m,int w,int h){
+    if (!cfg.saveDebug) return
+    ImageIO.write(maskImage(m,w,h),'PNG',dir.resolve(stem+'_'+step+'.png').toFile())
+}
+
+/** Write the image as read, so the debug series starts from the input. */
+void debugImage(Map cfg,Path dir,String stem,String step,BufferedImage im){
+    if (!cfg.saveDebug) return
+    ImageIO.write(im,'PNG',dir.resolve(stem+'_'+step+'.png').toFile())
+}
+
+/**
+ * Write a float map as an 8-bit PNG, scaled linearly between its own extremes
+ * over `use`, and return a note recording that scaling.
+ *
+ * A texture map has no natural display range, so the note matters as much as
+ * the picture: without the range the grey levels cannot be related back to the
+ * threshold the report says was applied.
+ */
+String debugMap(Map cfg,Path dir,String stem,String step,float[] v,int w,int h,boolean[] use){
+    if (!cfg.saveDebug) return ''
+    double mn=Double.POSITIVE_INFINITY, mx=Double.NEGATIVE_INFINITY
+    for(int i=0;i<v.length;i++) if(use[i]){ mn=Math.min(mn,v[i]); mx=Math.max(mx,v[i]) }
+    if(!Double.isFinite(mn)||!(mx>mn)){ mn=0d; mx=1d }
+    BufferedImage out=new BufferedImage(w,h,BufferedImage.TYPE_BYTE_GRAY)
+    double scale=255d/(mx-mn)
+    for(int y=0;y<h;y++)for(int x=0;x<w;x++){
+        int g=(int)Math.round((v[y*w+x]-mn)*scale)
+        out.raster.setSample(x,y,0,g<0?0:(g>255?255:g))
+    }
+    ImageIO.write(out,'PNG',dir.resolve(stem+'_'+step+'.png').toFile())
+    step+': grey 0..255 spans log-variance ' + mn + ' .. ' + mx
 }
 
 /**

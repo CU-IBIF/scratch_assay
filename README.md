@@ -235,6 +235,7 @@ what it changed.
 | Save masks | Write a binary mask PNG per image |
 | Save QC overlays | Write a QC overlay PNG per image |
 | Save width profile CSVs | Write the measured lines to `QC/<image>_width_profile.csv` |
+| Save per-step debug images | Write every intermediate image to `Debug/`, for working out why a hard image failed |
 | Width profile stride | Write every Nth line to that file; does not affect any measurement |
 
 ### Using a trained QuPath pixel classifier
@@ -325,6 +326,39 @@ every row so the threshold can be tuned to your imagery.
 
 A mask covering the entire analysis field leaves no outside to compare against,
 and is rejected for the same reason.
+
+### Working out why an image failed
+
+Turn on **Save per-step debug images** and every stage writes a numbered PNG to
+`Scratch_Assay_Results/Debug/`, plus `<image>_debug.txt` recording the
+thresholds, pixel counts and decisions:
+
+| File | What it shows |
+|---|---|
+| `01_source` | the image as read, at the analysis downsample |
+| `02_field` | the analysis field, from the percentage or a `Restrict` annotation |
+| `03_texture` | the log-variance map the threshold is chosen on |
+| `04_initial_mask` | the thresholded mask, or the classifier's output |
+| `05_morphology` | after close/open |
+| `06_largest_component` | the component that was kept |
+| `07_discarded` | **everything the component choice threw away** |
+| `08_holes_filled` | after fill holes |
+| `09_refine_band`, `10_refine_texture`, `11_refined` | the second pass |
+| `12_final` | the mask that was measured |
+
+With a lot of debris, `07_discarded` is usually the one that answers it. Debris
+scattered through the gap breaks the wound into pieces, and only the largest
+survives; if `07_discarded` holds most of the wound, the fix is a larger
+**Close iterations** to bridge the debris before the component is chosen, not a
+different threshold. The report's pixel counts show which step lost the area,
+and the texture ratio shows whether the presence test rejected it.
+
+Each `03_texture` and `10_refine_texture` note in the report gives the
+log-variance range that grey 0..255 spans, so the picture can be related back
+to the threshold.
+
+The dump is off by default, costs roughly a dozen PNGs per image, and changes
+nothing about what is measured.
 
 ### Remaining limitations
 
