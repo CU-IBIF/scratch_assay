@@ -216,6 +216,31 @@ what it changed.
 
 ## Parameters
 
+Every parameter carries a tooltip in the dialog: hover either the label or the
+control for what it does, what units it is in, and which way to move it. The
+table below is the summary; the tooltips are the reference, and they are
+generated from the same list that builds the form, so the two cannot drift
+apart.
+
+Two things keep the form honest:
+
+- **Parameters a run will ignore are greyed out.** The refinement rows go dim
+  when the second pass is off; the classifier rows go dim under the variance
+  threshold; the profile stride goes dim when profiles are not being saved; and
+  the variance radius and smoothing go dim under a classifier when nothing
+  reads the variance map. The rule is the same one the pipeline uses, so the
+  form cannot offer a setting that has no effect. A dim row still explains
+  itself - hover its label and the tooltip says what switches it back on. A
+  greyed-out field also cannot block a run: it is validated against its
+  default, not against whatever text it holds.
+- **The last settings that ran are the next run's defaults.** They are kept
+  per user, in `java.util.prefs`, not in the project, so they follow you across
+  projects and QuPath restarts. **Reset to defaults** puts everything back.
+  Scratch orientation is remembered per image name, since that is a fact about
+  the experiment and the same on every re-run; which images are *ticked* is not
+  remembered, because that usually changes. An image the store has not seen -
+  including every image of a different project - starts out vertical.
+
 | Setting | Meaning |
 |---|---|
 | Images to measure | Tick the images to process; all are ticked by default |
@@ -466,6 +491,7 @@ Run the repository checks without launching QuPath:
 
 ```bash
 python3 tests/test_script_contract.py
+python3 tests/test_dialog.py
 python3 tests/test_benchmark.py
 python3 tests/test_basic_stitcher.py
 ```
@@ -479,6 +505,18 @@ IJ_JAR=/path/to/Fiji.app/jars/ij-1.54j.jar python3 tests/test_basic_stitcher.py
 ```
 
 The contract test verifies required exports, the CSV contract, memory hygiene,
-annotation provenance, that time-course behaviour stays removed, and balanced
-delimiters. Functional image-server testing should be performed inside the
-supported QuPath versions.
+annotation provenance, that the numeric helpers stay statically compiled, that
+time-course behaviour stays removed, and balanced delimiters.
+
+`test_dialog.py` covers the settings form. The form needs JavaFX, which a
+headless container does not have, so the parts worth testing are written as
+plain functions in the script - `paramSpec`, `deadParams`, `inactiveReason` and
+the preference helpers - and run through the real Groovy interpreter. It checks
+the enable rules as a truth table, that every parameter has a tooltip saying
+appreciably more than its label, that every parameter the form offers is one
+the pipeline reads, that every row that can go inactive says what revives it,
+and that the preference store survives being absent, oversized or empty. It
+needs `groovy` on `PATH`, or `GROOVY_JAR`.
+
+Functional image-server testing should be performed inside the supported QuPath
+versions.

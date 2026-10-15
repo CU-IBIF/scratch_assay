@@ -12,6 +12,7 @@
  */
 
 import javafx.application.Platform
+import javafx.beans.value.ChangeListener
 import javafx.geometry.Insets
 import javafx.scene.control.*
 import javafx.event.EventHandler
@@ -165,8 +166,11 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         debugImage(cfg, debugDir, stem, '01_source', source)
         debugMask(cfg, debugDir, stem, '02_field', field, w, h)
 
-        // Computed in both modes: the variance threshold needs it, and so does
-        // the wound-presence test below, which guards the classifier too.
+        // Three things read this: the variance threshold, the wound-presence
+        // test below (which guards the classifier path too) and the 03_texture
+        // dump. Under a classifier with none of them active it is pure waste,
+        // which is what needTexture is for. deadParams greys out the two
+        // parameters below in exactly that case.
         float[] texture1 = needTexture
             ? textureMap(gray, w, h, cfg.varianceRadius as int, cfg.smoothSigma as double) : null
         if (cfg.saveDebug && texture1 != null)
@@ -401,6 +405,164 @@ void checkMemoryBudget(String name, int w, int h, Map cfg) {
 }
 
 /**
+ * Every parameter described once: label, tooltip, default and kind.
+ *
+ * The form, the tooltips, the enable rules, the validation fallbacks and the
+ * saved preferences all key off this one list. Two parallel lists of fields and
+ * labels, which is what this replaces, silently mislabels every row below an
+ * insertion.
+ *
+ * `kind` is 'text', 'check', 'choice' (fixed options) or 'classifier' (options
+ * from the project, but free text allowed).
+ */
+List paramSpec() {
+    [
+    [key:'inputMode', kind:'choice', value:'Variance threshold',
+     choices:['Variance threshold','Pixel classifier'],
+     label:'Starting mask',
+     tip:'Where the first-pass wound mask comes from. Variance threshold needs no training: it finds the smooth, low-texture region in a map of local intensity variance. Pixel classifier uses one you trained and saved in this project.'],
+    [key:'classifierName', kind:'classifier', value:'', choices:[],
+     label:'Saved pixel classifier',
+     tip:'A pixel classifier saved in this project. It must suit every image you process: same channels, resolution and features. The box is editable, so a name missing from the list can be typed in.'],
+    [key:'woundClass', kind:'text', value:'Wound',
+     label:'Classifier wound class',
+     tip:'The classifier output class that means open wound, for example Wound. Matching ignores case. Every other class counts as cell sheet.'],
+    [key:'downsample', kind:'text', value:'4',
+     label:'Downsample',
+     tip:'Read the image at 1/N resolution. This is the main control on both speed and memory, and cost falls with the square: 8 is about four times cheaper than 4. Raise it if a run is slow or an image is refused; lower it if the wound edge looks blocky.'],
+    [key:'analysisPercent', kind:'text', value:'90',
+     label:'Analysis field (%)',
+     tip:'Keep a centred box of this percentage of width and height and discard the border, which avoids vignetting and edge debris. Use 100 when comparing area or length against a known value, since anything less clips scan lines. Ignored on an image carrying a Restrict rectangle.'],
+    [key:'varianceRadius', kind:'text', value:'5',
+     label:'Variance radius (analysis px)',
+     tip:'Radius of the square neighbourhood the local variance is measured over. It has to span about a cell to describe the texture of the sheet, and that sets the narrowest wound the method can resolve, around three cell diameters. Shrinking it does not rescue a narrow wound; it makes matters worse, because a small neighbourhood cannot characterise the sheet either.'],
+    [key:'smoothSigma', kind:'text', value:'2',
+     label:'Texture smoothing sigma',
+     tip:'Gaussian blur applied to the variance map before thresholding, in analysis pixels. Higher is smoother and less speckled but rounds off real detail at the wound edge.'],
+    [key:'minArea', kind:'text', value:'5000',
+     label:'Minimum wound area (full-res px²)',
+     tip:'A candidate wound smaller than this is discarded and the image reported as NOT_FOUND. Set it well below the smallest wound you expect, but above the largest clump of debris.'],
+    [key:'closeIterations', kind:'text', value:'2',
+     label:'Close iterations',
+     tip:'Closing passes (dilate then erode) on the first-pass mask. Bridges small gaps and swallows speckle inside the wound. Too many round the corners off it.'],
+    [key:'openIterations', kind:'text', value:'1',
+     label:'Open iterations',
+     tip:'Opening passes (erode then dilate) on the first-pass mask. Removes thin bridges and isolated specks. Too many erode a narrow wound away altogether.'],
+    [key:'fillHoles', kind:'check', value:'true',
+     label:'Fill holes in wound',
+     tip:'Fill anything enclosed by the wound, such as debris and detached cells sitting in the gap, so the reported area is the true open area. This step only ever adds pixels, never removes them, and what it added goes in the Holes_Filled_px2 column.'],
+    [key:'secondPass', kind:'check', value:'true',
+     label:'Enable second pass',
+     tip:'Re-threshold a narrow band around the first-pass edge at a finer texture scale, to sharpen the boundary. On the synthetic benchmark the default band happens to cancel the opposite bias of the first pass, which depends on halo width: re-check it against your own imagery if you change objective or camera.'],
+    [key:'refineBand', kind:'text', value:'20',
+     label:'Refinement band (full-res px)',
+     tip:'How far either side of the first-pass edge the second pass may move the boundary. Nothing outside this band can change.'],
+    [key:'refineVarianceRadius', kind:'text', value:'3',
+     label:'Refinement variance radius',
+     tip:'Variance radius for the second pass, in analysis pixels. Smaller than the first pass, because it only has to resolve the edge rather than characterise the whole sheet.'],
+    [key:'refineSmoothSigma', kind:'text', value:'1',
+     label:'Refinement smoothing sigma',
+     tip:'Gaussian blur for the second-pass variance map, in analysis pixels. Lower than the first pass, because smoothing the map is what blurs the edge the second pass exists to sharpen.'],
+    [key:'refineCloseIterations', kind:'text', value:'1',
+     label:'Refinement close iterations',
+     tip:'Closing passes (dilate then erode) on the refined mask. One is usually enough: the refined boundary is only being tidied, not rescued, and the first pass has already removed the speckle.'],
+    [key:'refineOpenIterations', kind:'text', value:'0',
+     label:'Refinement open iterations',
+     tip:'Opening passes on the refined mask. Left at 0 by default, because the refined boundary is already narrow and opening it erodes the edge the second pass just found.'],
+    [key:'minTextureRatio', kind:'text', value:'2.5',
+     label:'Minimum sheet/wound texture ratio',
+     tip:'Reject an image unless the sheet is at least this many times more textured than the proposed wound. Otsu always returns a threshold, even on a closed monolayer, so without this test a closed sheet reports a wound that is not there. 0 turns the test off. Calibrate it by running once at 0 and reading Sheet_Wound_Texture_Ratio for images you trust.'],
+    [key:'saveMasks', kind:'check', value:'true',
+     label:'Save masks',
+     tip:'Write a binary PNG of the final wound per image, at analysis resolution, into masks/.'],
+    [key:'saveQC', kind:'check', value:'true',
+     label:'Save QC overlays',
+     tip:'Write the source image per image into QC/, with the first-pass edge in yellow, the final edge in red and any Restrict rectangle in cyan.'],
+    [key:'saveProfiles', kind:'check', value:'true',
+     label:'Save width profile CSVs',
+     tip:'Write one CSV per image into QC/ holding every measured width and the start and end coordinates of the scan line it came from, so a number in the summary can be drawn back onto the image that produced it.'],
+    [key:'profileStride', kind:'text', value:'1',
+     label:'Width profile stride (every Nth line)',
+     tip:'Write only every Nth scan line to the profile CSV. This thins that file alone: the summary statistics are always computed over every line.'],
+    [key:'saveDebug', kind:'check', value:'false',
+     label:'Save per-step debug images',
+     tip:'Write the mask after every pipeline step, plus the texture map and a text log, into debug/. This is how you find which step lost the wound. It is slow and writes a PNG per step per image, so point it at a few images rather than a whole project.'],
+    ]
+}
+
+/**
+ * The parameters the run will not read, given the rest of the form.
+ *
+ * Kept out of the form so the rule is one statement that can be checked without
+ * JavaFX, rather than a scatter of setDisable calls. `needTexture` is the same
+ * condition analyseImage uses to decide whether to build the variance map, so
+ * the form cannot offer a parameter the run ignores, or hide one it reads.
+ */
+Set deadParams(String inputMode, boolean secondPass, boolean saveDebug,
+               boolean saveProfiles, double minTextureRatio) {
+    boolean classifier = inputMode == 'Pixel classifier'
+    boolean needTexture = !classifier || minTextureRatio > 0d || saveDebug
+    Set dead = [] as Set
+    if (!classifier) dead.addAll(['classifierName','woundClass'])
+    if (!needTexture) dead.addAll(['varianceRadius','smoothSigma'])
+    if (!secondPass) dead.addAll(['refineBand','refineVarianceRadius','refineSmoothSigma',
+                                  'refineCloseIterations','refineOpenIterations'])
+    if (!saveProfiles) dead.add('profileStride')
+    dead
+}
+
+/**
+ * What to tell someone hovering an inactive row. Kept beside deadParams,
+ * because a parameter that can be switched off needs to say what switches it
+ * back on; tests/test_dialog.py checks that every key deadParams can return
+ * has an entry here.
+ */
+Map inactiveReason() {
+    String noTexture = 'Inactive: nothing in this run reads the variance map. The starting mask comes from the classifier, the presence test is off, and debug images are off. Turning on any one of those brings this back.'
+    String noClassifier = 'Inactive: the starting mask is the variance threshold. Set Starting mask to Pixel classifier to use this.'
+    String noSecondPass = 'Inactive: the second pass is off.'
+    [classifierName:noClassifier, woundClass:noClassifier,
+     varianceRadius:noTexture, smoothSigma:noTexture,
+     refineBand:noSecondPass, refineVarianceRadius:noSecondPass, refineSmoothSigma:noSecondPass,
+     refineCloseIterations:noSecondPass, refineOpenIterations:noSecondPass,
+     profileStride:'Inactive: width profile CSVs are not being saved, and the stride thins that file alone.']
+}
+
+/**
+ * Preference store for the last-used settings, or null where it is unavailable.
+ *
+ * java.util.prefs keeps these out of the project, so they follow the user
+ * rather than the data. A locked-down JRE can refuse, and an unwritable store
+ * throws only on flush, so every use is guarded: failing to remember settings
+ * must never stop an analysis.
+ */
+java.util.prefs.Preferences settingsStore() {
+    try { return java.util.prefs.Preferences.userRoot().node('qupath/scratchassay') }
+    catch (Exception ignored) { return null }
+}
+
+String storeGet(store, String key) {
+    if (store == null) return null
+    try { return store.get(key, null) } catch (Exception ignored) { return null }
+}
+
+void storePut(store, String key, String value) {
+    if (store == null) return
+    // MAX_VALUE_LENGTH is 8192; the orientation list is the only entry that can
+    // approach it, and dropping it is better than failing the run.
+    if (value == null || value.length() >= 8192) return
+    try { store.put(key, value) } catch (Exception ignored) { }
+}
+
+/** A tooltip that wraps instead of running off the screen. */
+Tooltip helpTip(String text) {
+    def t = new Tooltip(text)
+    t.wrapText = true
+    t.maxWidth = 420
+    t
+}
+
+/**
  * QuPath runs scripts on a background thread, but JavaFX windows can only be
  * built and shown on the FX application thread. Marshal there and block until
  * the user dismisses the dialog.
@@ -420,16 +582,65 @@ Map buildSettingsDialog(project, List entries) {
     } catch (Exception ignored) {
         classifierNames = []
     }
+
+    def store = settingsStore()
+    List spec = paramSpec()
+    Map byKey = spec.collectEntries { [(it.key): it] }
+    byKey.classifierName.choices = classifierNames
+    if (!classifierNames.empty) byKey.classifierName.value = classifierNames[0]
+    // Captured before the stored values overwrite them, because a disabled
+    // field is validated against its default rather than whatever text it holds.
+    Map defaults = spec.collectEntries { [(it.key): it.value] }
+
+    // Last run wins over the built-in defaults, so a project can be re-run
+    // without setting the form up again. A stored value that is no longer
+    // meaningful, such as a removed classifier or a renamed mode, falls back to
+    // the default instead of failing.
+    spec.each { p ->
+        String saved = storeGet(store, 'param.' + p.key)
+        if (saved == null) return
+        if (p.kind == 'check') { if (saved=='true' || saved=='false') p.value = saved }
+        else if (p.kind == 'choice') { if (p.choices.contains(saved)) p.value = saved }
+        else p.value = saved
+    }
+
+    spec.each { p ->
+        if (p.kind == 'check') {
+            def c = new CheckBox(); c.selected = (p.value == 'true'); p.node = c
+        } else if (p.kind == 'choice' || p.kind == 'classifier') {
+            def c = new ComboBox(); c.items.addAll(p.choices)
+            c.editable = (p.kind == 'classifier')
+            if (p.value) c.value = p.value
+            p.node = c
+        } else {
+            p.node = new TextField(p.value)
+        }
+        p.labelNode = new Label(p.label)
+        // Both halves of the row carry the tip: whichever one the pointer
+        // lands on should explain the parameter.
+        p.node.tooltip = helpTip(p.tip)
+        p.labelNode.tooltip = helpTip(p.tip)
+    }
+
     // One row per project image: a tick to include it and its scratch
     // orientation. Positions match the caller's sorted entry list one for one.
     // Spelled out, because "vertical" alone leaves it open whether it describes
     // the scratch or the direction the width is measured in.
     String vLabel = 'Vertical scratch (width measured left-right)'
     String hLabel = 'Horizontal scratch (width measured top-bottom)'
+    // Orientation is remembered by image name, unlike the ticks: it is a fact
+    // about the experiment, so it is the same on every re-run, whereas which
+    // subset to measure usually is not. Only the horizontal names are stored,
+    // so an unknown image, including every image of a different project,
+    // defaults to vertical.
+    Set wasHorizontal = ((storeGet(store, 'horizontalImages') ?: '').split('\n') as List)
+                            .findAll { it } as Set
     List picks = entries.collect { entry ->
-        def tick = new CheckBox(entry.getImageName()); tick.selected = true
-        def orient = new ComboBox(); orient.items.addAll(vLabel, hLabel); orient.value = vLabel
-        [tick:tick, orient:orient]
+        String name = entry.getImageName()
+        def tick = new CheckBox(name); tick.selected = true
+        def orient = new ComboBox(); orient.items.addAll(vLabel, hLabel)
+        orient.value = wasHorizontal.contains(name) ? hLabel : vLabel
+        [name:name, tick:tick, orient:orient]
     }
     def pickGrid = new GridPane(hgap:12, vgap:3)
     picks.eachWithIndex { r, i -> pickGrid.add(r.tick, 0, i); pickGrid.add(r.orient, 1, i) }
@@ -446,73 +657,114 @@ Map buildSettingsDialog(project, List entries) {
     def pickScroll = new ScrollPane(pickGrid); pickScroll.fitToWidth = true; pickScroll.prefViewportHeight = 170
     def pickBox = new VBox(6, toolbar, pickScroll)
 
-    def fields = [
-        inputMode:new ComboBox(), classifierName:new ComboBox(),
-        woundClass:new TextField('Wound'),
-        downsample:new TextField('4'), analysisPercent:new TextField('90'), varianceRadius:new TextField('5'),
-        smoothSigma:new TextField('2'), minArea:new TextField('5000'), closeIterations:new TextField('2'),
-        openIterations:new TextField('1'), fillHoles:new CheckBox(), secondPass:new CheckBox(),
-        refineBand:new TextField('20'),
-        refineVarianceRadius:new TextField('3'), refineSmoothSigma:new TextField('1'),
-        refineCloseIterations:new TextField('1'), refineOpenIterations:new TextField('0'),
-        minTextureRatio:new TextField('2.5'),
-        saveMasks:new CheckBox(), saveQC:new CheckBox(), saveProfiles:new CheckBox(),
-        profileStride:new TextField('1'), saveDebug:new CheckBox()
-    ]
-    fields.inputMode.items.addAll('Variance threshold', 'Pixel classifier')
-    fields.inputMode.value='Variance threshold'
-    fields.classifierName.items.addAll(classifierNames)
-    fields.classifierName.editable=true
-    if (!classifierNames.empty) fields.classifierName.value=classifierNames[0]
-    fields.fillHoles.selected=true
-    fields.secondPass.selected=true; fields.saveMasks.selected=true
-    fields.saveQC.selected=true; fields.saveProfiles.selected=true
-    def labels=['Starting mask','Saved pixel classifier','Classifier wound class','Downsample','Analysis field (%)',
-                'Variance radius (analysis px)','Texture smoothing sigma',
-                'Minimum wound area (full-res px²)','Close iterations','Open iterations',
-                'Fill holes in wound','Enable second pass',
-                'Refinement band (full-res px)','Refinement variance radius','Refinement smoothing sigma',
-                'Refinement close iterations','Refinement open iterations',
-                'Minimum sheet/wound texture ratio','Save masks','Save QC overlays',
-                'Save width profile CSVs','Width profile stride (every Nth line)',
-                'Save per-step debug images']
     def grid=new GridPane(hgap:10,vgap:7,padding:new Insets(12))
     grid.add(new Label("Images to measure (${entries.size()}) and scratch orientation"),0,0)
     grid.add(pickBox,1,0)
-    fields.values().eachWithIndex { node,i -> grid.add(new Label(labels[i]),0,i+1); grid.add(node,1,i+1) }
+    spec.eachWithIndex { p,i -> grid.add(p.labelNode,0,i+1); grid.add(p.node,1,i+1) }
+
+    Map reasons = inactiveReason()
+    /**
+     * Grey out a row rather than leave it looking live.
+     *
+     * The label is dimmed rather than disabled, deliberately: a disabled
+     * JavaFX node receives no mouse events, so disabling it would swallow the
+     * tooltip exactly when someone wants to know why the row has gone dead.
+     * Dimming keeps it hoverable, and the tooltip then says what revives it.
+     */
+    def setLive = { String key, boolean live ->
+        def p = byKey[key]
+        p.node.disable = !live
+        p.labelNode.opacity = live ? 1.0d : 0.45d
+        p.labelNode.tooltip = helpTip(live ? p.tip : p.tip + '\n\n' + reasons[key])
+    }
+    def refresh = {
+        // Mid-edit the text is routinely unparseable, and flickering the
+        // texture rows disabled while someone types is worse than assuming the
+        // test is on. Unparseable therefore counts as on.
+        double ratio
+        try { ratio = Double.parseDouble(byKey.minTextureRatio.node.text.trim()) }
+        catch (Exception ignored) { ratio = 1d }
+        Set dead = deadParams(byKey.inputMode.node.value as String,
+                              byKey.secondPass.node.selected, byKey.saveDebug.node.selected,
+                              byKey.saveProfiles.node.selected, ratio)
+        spec.each { p -> setLive(p.key, !dead.contains(p.key)) }
+    }
+    // addListener is overloaded on ChangeListener and InvalidationListener, so
+    // the cast is not decoration: a bare closure picks the wrong one.
+    byKey.inputMode.node.valueProperty().addListener({ o,a,b -> refresh() } as ChangeListener)
+    byKey.minTextureRatio.node.textProperty().addListener({ o,a,b -> refresh() } as ChangeListener)
+    ['secondPass','saveDebug','saveProfiles'].each {
+        byKey[it].node.selectedProperty().addListener({ o,a,b -> refresh() } as ChangeListener)
+    }
+    refresh()
+
+    def reset = new Button('Reset to defaults')
+    reset.tooltip = helpTip('Put every parameter back to the value it ships with, discarding the settings remembered from the last run. The image ticks and orientations are left alone.')
+    reset.setOnAction({ e ->
+        spec.each { p ->
+            String d = defaults[p.key]
+            if (p.kind == 'check') p.node.selected = (d == 'true')
+            else if (p.kind == 'choice' || p.kind == 'classifier') p.node.value = d
+            else p.node.text = d
+        }
+        refresh()
+    } as EventHandler)
+    grid.add(reset, 1, spec.size() + 1)
+
     def dialog=new Dialog<Map>(); dialog.title='Scratch Assay Analyzer'; dialog.initModality(Modality.APPLICATION_MODAL)
     // The picker makes the form tall enough to overflow a small screen.
     def scroll=new ScrollPane(grid); scroll.fitToWidth=true; scroll.prefViewportHeight=600
     dialog.dialogPane.content=scroll; dialog.resizable=true
     dialog.dialogPane.buttonTypes.addAll(ButtonType.OK,ButtonType.CANCEL)
-    dialog.setResultConverter { it==ButtonType.OK ? fields : null }
+    dialog.setResultConverter { it==ButtonType.OK ? byKey : null }
     def result=dialog.showAndWait(); if (!result.isPresent()) return null
     try {
         Map f=result.get()
+        // A disabled parameter has no effect on the run, so it is read from its
+        // default rather than from the form. Otherwise text left invalid before
+        // a field was switched off would block a run it cannot influence.
+        def txt = { String k -> f[k].node.disable ? defaults[k] : f[k].node.text }
         List selection=[]
         picks.eachWithIndex { r,i -> if (r.tick.selected)
             selection << [index:i, orientation:isHorizontal(r.orient.value) ? 'Horizontal' : 'Vertical'] }
         Map c=[selection:selection,
-               inputMode:f.inputMode.value, classifierName:(f.classifierName.editor.text ?: f.classifierName.value ?: '').trim(),
-               woundClass:f.woundClass.text.trim(), downsample:positive(f.downsample.text,'Downsample'), analysisPercent:positive(f.analysisPercent.text,'Analysis field'),
-               varianceRadius:nonnegativeInt(f.varianceRadius.text,'Variance radius'), smoothSigma:nonnegative(f.smoothSigma.text,'Smoothing'),
-               minArea:positive(f.minArea.text,'Minimum area'), closeIterations:nonnegativeInt(f.closeIterations.text,'Close iterations'),
-               openIterations:nonnegativeInt(f.openIterations.text,'Open iterations'),
-               fillHoles:f.fillHoles.selected, secondPass:f.secondPass.selected,
-               refineBand:positive(f.refineBand.text,'Refinement band'), refineVarianceRadius:nonnegativeInt(f.refineVarianceRadius.text,'Refinement radius'),
-               refineSmoothSigma:nonnegative(f.refineSmoothSigma.text,'Refinement smoothing'),
-               refineCloseIterations:nonnegativeInt(f.refineCloseIterations.text,'Refinement close'),
-               refineOpenIterations:nonnegativeInt(f.refineOpenIterations.text,'Refinement open'),
-               minTextureRatio:nonnegative(f.minTextureRatio.text,'Minimum texture ratio'),
-               saveMasks:f.saveMasks.selected, saveQC:f.saveQC.selected,
-               saveProfiles:f.saveProfiles.selected,
-               profileStride:positiveInt(f.profileStride.text,'Profile stride'),
-               saveDebug:f.saveDebug.selected]
+               inputMode:f.inputMode.node.value,
+               classifierName:(f.classifierName.node.editor.text ?: f.classifierName.node.value ?: '').trim(),
+               woundClass:txt('woundClass').trim(), downsample:positive(txt('downsample'),'Downsample'),
+               analysisPercent:positive(txt('analysisPercent'),'Analysis field'),
+               varianceRadius:nonnegativeInt(txt('varianceRadius'),'Variance radius'),
+               smoothSigma:nonnegative(txt('smoothSigma'),'Smoothing'),
+               minArea:positive(txt('minArea'),'Minimum area'),
+               closeIterations:nonnegativeInt(txt('closeIterations'),'Close iterations'),
+               openIterations:nonnegativeInt(txt('openIterations'),'Open iterations'),
+               fillHoles:f.fillHoles.node.selected, secondPass:f.secondPass.node.selected,
+               refineBand:positive(txt('refineBand'),'Refinement band'),
+               refineVarianceRadius:nonnegativeInt(txt('refineVarianceRadius'),'Refinement radius'),
+               refineSmoothSigma:nonnegative(txt('refineSmoothSigma'),'Refinement smoothing'),
+               refineCloseIterations:nonnegativeInt(txt('refineCloseIterations'),'Refinement close'),
+               refineOpenIterations:nonnegativeInt(txt('refineOpenIterations'),'Refinement open'),
+               minTextureRatio:nonnegative(txt('minTextureRatio'),'Minimum texture ratio'),
+               saveMasks:f.saveMasks.node.selected, saveQC:f.saveQC.node.selected,
+               saveProfiles:f.saveProfiles.node.selected,
+               profileStride:positiveInt(txt('profileStride'),'Profile stride'),
+               saveDebug:f.saveDebug.node.selected]
         if (c.analysisPercent > 100) throw new IllegalArgumentException('Analysis field must not exceed 100')
         if (c.inputMode == 'Pixel classifier' && !c.classifierName)
             throw new IllegalArgumentException('Choose or enter a saved pixel classifier')
         if (c.inputMode == 'Pixel classifier' && !c.woundClass)
             throw new IllegalArgumentException('Enter the classifier class that represents the wound')
+        // Remembered only once the settings are known to be valid, so a typo is
+        // never what the next run starts from.
+        spec.each { p ->
+            String v
+            if (p.kind == 'check') v = p.node.selected ? 'true' : 'false'
+            else if (p.kind == 'choice') v = p.node.value as String
+            else if (p.kind == 'classifier') v = c.classifierName
+            else v = txt(p.key) as String
+            storePut(store, 'param.' + p.key, v)
+        }
+        storePut(store, 'horizontalImages',
+                 picks.findAll { isHorizontal(it.orient.value) }.collect { it.name }.join('\n'))
         return c
     } catch(Exception e) { Dialogs.showErrorMessage('Invalid settings',e.message); return null }
 }

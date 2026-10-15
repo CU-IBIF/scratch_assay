@@ -46,6 +46,12 @@ assert "fillHoles" in text
 # and each ticked image carries its own scratch orientation.
 assert "selection << [index:i, orientation:isHorizontal(r.orient.value)" in text
 assert "Images to measure" in text
+# Labels, tooltips, defaults and the remembered settings all come from one
+# spec. Parallel lists of fields and labels silently mislabel every row below
+# an insertion, which is what this replaced. tests/test_dialog.py has the rest.
+assert "List paramSpec()" in text
+assert "Set deadParams(String inputMode" in text
+assert "List labels=[" not in text, "the parallel label list is what paramSpec replaced"
 assert "Vertical scratch (width measured left-right)" in text
 assert "Horizontal scratch (width measured top-bottom)" in text
 # One place decides what counts as horizontal.
@@ -63,7 +69,7 @@ assert "if (cfg.saveQC || cfg.saveProfiles) Files.createDirectories(qcDir)" in t
 # Stride thins the profile file only: the summary is always over every line.
 assert "profileStride" in text
 assert "if (i % stride != 0) return" in text
-assert "positiveInt(f.profileStride.text" in text
+assert "positiveInt(txt('profileStride'),'Profile stride')" in text
 
 # A "Restrict" annotation confines the analysis field; without one the whole
 # centred field is used. Matching is on classification or name, either case.
