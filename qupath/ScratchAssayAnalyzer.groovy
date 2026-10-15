@@ -38,6 +38,8 @@ import java.nio.file.Path
 import java.text.DecimalFormat
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import groovy.transform.CompileStatic
+
 import java.util.concurrent.Callable
 import java.util.concurrent.FutureTask
 
@@ -118,7 +120,14 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         int w = source.getWidth(), h = source.getHeight()
         double dsX = server.getWidth() / (double)w
         double dsY = server.getHeight() / (double)h
-        float[] gray = luminance(source)
+        // The variance map is the most expensive step in the pipeline, so build
+        // it, and the luminance it needs, only when something consumes them.
+        // Under the pixel classifier the first-pass threshold does not, which
+        // leaves the presence test and the debug dump as the only consumers.
+        boolean needTexture = (cfg.inputMode != 'Pixel classifier') ||
+                              (cfg.minTextureRatio as double) > 0d || cfg.saveDebug
+        boolean needGray = needTexture || cfg.secondPass
+        float[] gray = needGray ? luminance(source) : null
 
         // A "Restrict" annotation, when the image carries one, replaces the
         // centred analysis field outright: it is an explicit instruction about
@@ -158,19 +167,20 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
 
         // Computed in both modes: the variance threshold needs it, and so does
         // the wound-presence test below, which guards the classifier too.
-        float[] texture1 = textureMap(gray, w, h, cfg.varianceRadius as int, cfg.smoothSigma as double)
-        if (cfg.saveDebug)
+        float[] texture1 = needTexture
+            ? textureMap(gray, w, h, cfg.varianceRadius as int, cfg.smoothSigma as double) : null
+        if (cfg.saveDebug && texture1 != null)
             dbg << debugMap(cfg, debugDir, stem, '03_texture', texture1, w, h, field)
         boolean[] pass1
         double cut1 = Double.NaN
         if (cfg.inputMode == 'Pixel classifier') {
             pass1 = classifierMask(project, imageData, cfg.classifierName as String,
                 cfg.woundClass as String, w, h, ds)
-            for (int i=0; i<pass1.length; i++) pass1[i] = pass1[i] && field[i]
+            andMask(pass1, field)
         } else {
             cut1 = otsu(texture1, field)
             pass1 = new boolean[w*h]
-            for (int i=0; i<pass1.length; i++) pass1[i] = field[i] && texture1[i] <= cut1
+            maskBelow(texture1, field, cut1, pass1)
         }
         debugMask(cfg, debugDir, stem, '04_initial_mask', pass1, w, h)
         if (cfg.saveDebug) {
@@ -210,30 +220,45 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         // map has only one mode, so without this a fully healed wound still
         // reports one. A real wound is bare substrate and so far smoother than
         // the sheet around it; a slightly duller patch of sheet is not.
-        double ratio = (selected == null) ? Double.NaN
-                     : textureRatio(texture1, firstMask, field)
+        // A minimum of 0 switches the test off, in which case the ratio is not
+        // worth the variance map it would need. Skipping the comparison rather
+        // than comparing against 0 also keeps a NaN from rejecting everything.
+        double ratio = Double.NaN
         String detection = 'FOUND'
-        if (selected != null && !(ratio >= (cfg.minTextureRatio as double))) {
-            selected = null
-            firstMask = new boolean[w*h]
-            detection = 'REJECTED_LOW_CONTRAST'
-        } else if (selected == null) {
+        if (selected == null) {
             detection = 'NOT_FOUND'
+        } else if ((cfg.minTextureRatio as double) > 0d) {
+            ratio = textureRatio(texture1, firstMask, field)
+            if (!(ratio >= (cfg.minTextureRatio as double))) {
+                selected = null
+                firstMask = new boolean[w*h]
+                detection = 'REJECTED_LOW_CONTRAST'
+            }
         }
+        debugMask(cfg, debugDir, stem, '08_presence_test', firstMask, w, h)
         if (cfg.saveDebug) {
             dbg << 'sheet/wound texture ratio: ' + ratio +
                    ' (minimum ' + cfg.minTextureRatio + ')'
             dbg << 'detection: ' + detection
+            if (detection == 'REJECTED_LOW_CONTRAST')
+                dbg << '08_presence_test: the candidate was CLEARED HERE - it was ' +
+                       'not smooth enough against its surroundings. Everything after ' +
+                       'this step is empty as a consequence, not as a further failure. ' +
+                       'Lower "Minimum sheet/wound texture ratio" (0 disables the test) ' +
+                       'to keep a wound at ratio ' + ratio + '.'
+            else
+                dbg << '08_presence_test: ' + firstMask.count(true) + ' px'
         }
         texture1 = null
 
         // Cells and debris sitting in the gap read as high texture, so they
         // punch holes in the wound. Closing them recovers the true open area.
         long holesFilled = (selected != null && cfg.fillHoles) ? fillHoles(firstMask, w, h) : 0L
-        debugMask(cfg, debugDir, stem, '08_holes_filled', firstMask, w, h)
+        debugMask(cfg, debugDir, stem, '09_holes_filled', firstMask, w, h)
         if (cfg.saveDebug)
-            dbg << '08_holes_filled: ' + firstMask.count(true) + ' px (' +
-                   holesFilled + ' px added)'
+            dbg << '09_holes_filled: ' + firstMask.count(true) + ' px (' +
+                   holesFilled + ' px added; this step only ever adds pixels, ' +
+                   'so it cannot be where a wound was lost)'
         boolean[] finalMask = firstMask
         double cut2 = Double.NaN
         String refineStatus = cfg.secondPass ? 'NO_COMPONENT' : 'DISABLED'
@@ -245,18 +270,18 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
             boolean[] searchBand = new boolean[w*h]
             for (int i=0; i<searchBand.length; i++) searchBand[i] = outer[i] && !inner[i] && field[i]
             outer = null
-            debugMask(cfg, debugDir, stem, '09_refine_band', searchBand, w, h)
+            debugMask(cfg, debugDir, stem, '10_refine_band', searchBand, w, h)
             float[] texture2 = textureMap(gray, w, h, cfg.refineVarianceRadius as int, cfg.refineSmoothSigma as double)
             if (cfg.saveDebug)
-                dbg << debugMap(cfg, debugDir, stem, '10_refine_texture', texture2, w, h, searchBand)
+                dbg << debugMap(cfg, debugDir, stem, '11_refine_texture', texture2, w, h, searchBand)
             cut2 = otsu(texture2, searchBand)
             boolean[] refined = inner
-            for (int i=0; i<refined.length; i++) if (searchBand[i] && texture2[i] <= cut2) refined[i] = true
+            addBelow(texture2, searchBand, cut2, refined)
             texture2 = null; searchBand = null
             refined = morphology(refined, w, h, cfg.refineCloseIterations as int, cfg.refineOpenIterations as int)
-            debugMask(cfg, debugDir, stem, '11_refined', refined, w, h)
+            debugMask(cfg, debugDir, stem, '12_refined', refined, w, h)
             if (cfg.saveDebug)
-                dbg << '11_refined (band ' + band + ' analysis px, threshold variance ' +
+                dbg << '12_refined (band ' + band + ' analysis px, threshold variance ' +
                        Math.expm1(cut2) + '): ' + refined.count(true) + ' px'
             Map best = largestComponent(refined, w, h, 1)
             refined = null
@@ -272,7 +297,7 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         gray = null
         field = null
 
-        debugMask(cfg, debugDir, stem, '12_final', finalMask, w, h)
+        debugMask(cfg, debugDir, stem, '13_final', finalMask, w, h)
 
         Map m = measurements(finalMask, w, h, vertical)
         double areaPx = m.area * dsX * dsY
@@ -285,7 +310,7 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
 
         if (cfg.saveDebug) {
             dbg << 'refinement: ' + refineStatus
-            dbg << '12_final: ' + m.area + ' analysis px'
+            dbg << '13_final: ' + m.area + ' analysis px'
             dbg << 'reported width: mean ' + (m.meanWidth*widthScale) +
                    ' full-res px, from ' + m.samples + ' scan lines'
             Files.write(debugDir.resolve(stem + '_debug.txt'), dbg, StandardCharsets.UTF_8)
@@ -544,13 +569,37 @@ double nonnegative(String s,String n){ double v=Double.parseDouble(s);if(v<0)thr
 int positiveInt(String s,String n){ int v=nonnegativeInt(s,n);if(v<1)throw new IllegalArgumentException("$n must be at least 1");v }
 int nonnegativeInt(String s,String n){ double v=nonnegative(s,n);if(v!=Math.rint(v))throw new IllegalArgumentException("$n must be an integer");v as int }
 
-float[] luminance(BufferedImage im) { int w=im.width,h=im.height; float[] a=new float[w*h]; for(int y=0;y<h;y++)for(int x=0;x<w;x++){int c=im.getRGB(x,y);a[y*w+x]=(float)(0.2126*((c>>16)&255)+0.7152*((c>>8)&255)+0.0722*(c&255))};a }
+/**
+ * Rec. 709 luminance of the image as read.
+ *
+ * One bulk getRGB per row rather than one call per pixel: the values are
+ * identical, because the same colour conversion runs either way, but the
+ * per-pixel call is the slow path. Note that for a grey image getRGB converts
+ * linear grey to sRGB, so these are not the stored sample values - that is
+ * fine for a texture measure, which only needs a monotone mapping.
+ */
+@CompileStatic
+float[] luminance(BufferedImage im) {
+    int w=im.width, h=im.height
+    float[] a=new float[w*h]
+    int[] row=new int[w]
+    for(int y=0;y<h;y++){
+        im.getRGB(0,y,w,1,row,0,w)
+        int off=y*w
+        for(int x=0;x<w;x++){
+            int c=row[x]
+            a[off+x]=(float)(0.2126*((c>>16)&255)+0.7152*((c>>8)&255)+0.0722*(c&255))
+        }
+    }
+    a
+}
 
 /**
  * Sum of src (or of src squared) over a (2r+1)-square window, clipped at the
  * image border. Separable sliding windows keep this at two float arrays
  * instead of the pair of double integral images an earlier version used.
  */
+@CompileStatic
 float[] boxSum(float[] src,int w,int h,int r,boolean square) {
     if(src.length<(long)w*h) throw new IllegalArgumentException("boxSum: an array of ${src.length} pixels cannot cover ${w}x${h}")
     float[] tmp=new float[src.length]
@@ -569,6 +618,7 @@ float[] boxSum(float[] src,int w,int h,int r,boolean square) {
 }
 
 /** Local variance over a (2r+1)-square window. The result reuses one input buffer. */
+@CompileStatic
 float[] localVariance(float[] a,int w,int h,int r) {
     if(r<=0) return new float[a.length]
     float[] s1=boxSum(a,w,h,r,false),s2=boxSum(a,w,h,r,true)
@@ -580,6 +630,7 @@ float[] localVariance(float[] a,int w,int h,int r) {
 }
 
 /** Separable Gaussian blur. Writes the result back into src to save an array. */
+@CompileStatic
 float[] gaussian(float[] src,int w,int h,double sigma) {
     if(src.length<(long)w*h) throw new IllegalArgumentException("gaussian: an array of ${src.length} pixels cannot cover ${w}x${h}")
     if(sigma<=0)return src; int r=Math.max(1,(int)Math.ceil(3*sigma));double[] k=new double[2*r+1];double total=0
@@ -603,6 +654,7 @@ float[] gaussian(float[] src,int w,int h,double sigma) {
  * Every threshold and comparison downstream is therefore in log units; the CSV
  * converts back so the exported numbers stay in variance units.
  */
+@CompileStatic
 float[] textureMap(float[] gray,int w,int h,int radius,double sigma){
     float[] t=gaussian(localVariance(gray,w,h,radius),w,h,sigma)
     for(int i=0;i<t.length;i++) t[i]=(float)Math.log1p(t[i])
@@ -618,6 +670,7 @@ float[] textureMap(float[] gray,int w,int h,int radius,double sigma){
  * ratio, so exponentiating gives a scale-free factor: bare substrate runs
  * several times smoother than a cell sheet, a duller patch of sheet does not.
  */
+@CompileStatic
 double textureRatio(float[] texture,boolean[] mask,boolean[] field){
     double inside=0, outside=0; long nIn=0, nOut=0
     for(int i=0;i<texture.length;i++){
@@ -628,6 +681,7 @@ double textureRatio(float[] texture,boolean[] mask,boolean[] field){
     Math.exp(outside/nOut - inside/nIn)
 }
 
+@CompileStatic
 double otsu(float[] a,boolean[] use) {
     double min=Double.POSITIVE_INFINITY,max=Double.NEGATIVE_INFINITY;for(int i=0;i<a.length;i++)if(use[i]){min=Math.min(min,a[i]);max=Math.max(max,a[i])}
     if(!Double.isFinite(min)||max<=min)return min;long[] hist=new long[256];long n=0;double scale=255/(max-min)
@@ -637,12 +691,14 @@ double otsu(float[] a,boolean[] use) {
     min+threshold/scale
 }
 
+@CompileStatic
 boolean[] morphology(boolean[] m,int w,int h,int closeN,int openN){boolean[] a=m;for(int i=0;i<closeN;i++)a=erode(dilate(a,w,h,1),w,h,1);for(int i=0;i<openN;i++)a=dilate(erode(a,w,h,1),w,h,1);a}
 
 /**
  * Dilate with a (2r+1)-square structuring element. Separable sliding counts
  * make this two passes regardless of r, rather than r passes of a 3x3 kernel.
  */
+@CompileStatic
 boolean[] dilate(boolean[] a,int w,int h,int r){
     if(r<=0)return a
     boolean[] tmp=new boolean[a.length]
@@ -664,6 +720,7 @@ boolean[] dilate(boolean[] a,int w,int h,int r){
  * Erode with a (2r+1)-square structuring element. A pixel survives only when
  * the whole window lies inside the image and is set, so the border erodes away.
  */
+@CompileStatic
 boolean[] erode(boolean[] a,int w,int h,int r){
     if(r<=0)return a
     int span=2*r+1
@@ -687,6 +744,7 @@ boolean[] erode(boolean[] a,int w,int h,int r){
  * [area, sum of x, sum of y]. When out is non-null the component is written
  * into it. Callers supply the scratch arrays so nothing is allocated per call.
  */
+@CompileStatic
 long[] flood(boolean[] mask,boolean[] seen,int[] queue,int w,int h,int seed,boolean[] out){
     int head=0,tail=0;queue[tail++]=seed;seen[seed]=true;long sx=0,sy=0
     while(head<tail){int p=queue[head++],y=Math.floorDiv(p,w),x=p-y*w
@@ -704,6 +762,7 @@ long[] flood(boolean[] mask,boolean[] seen,int[] queue,int w,int h,int seed,bool
  * a single component mask is ever held - peak memory does not grow with the
  * number of components, which is what a noisy threshold produces.
  */
+@CompileStatic
 Map largestComponent(boolean[] mask,int w,int h,int minimum){
     boolean[] seen=new boolean[mask.length]
     int[] queue=new int[mask.length]
@@ -759,10 +818,16 @@ String debugMap(Map cfg,Path dir,String stem,String step,float[] v,int w,int h,b
 
 /**
  * Fill background pockets that the mask fully encloses, and return how many
- * pixels were added. Background reachable from the image border is left alone,
+ * pixels were added.
+ *
+ * This only ever sets pixels, never clears them, so the wound it is handed can
+ * grow but can never shrink or disappear. If a wound seems to vanish "at fill
+ * holes", the step before it cleared the mask - most likely the wound-presence
+ * test. The debug dump writes 08_presence_test for exactly that reason. Background reachable from the image border is left alone,
  * so a wound that runs off the edge of the analysis field is not flooded shut -
  * only genuine interior holes, the cells and debris inside the gap, are closed.
  */
+@CompileStatic
 long fillHoles(boolean[] mask,int w,int h){
     boolean[] outside=new boolean[mask.length]
     int[] queue=new int[mask.length]
@@ -792,15 +857,63 @@ long fillHoles(boolean[] mask,int w,int h){
  * in the pipeline uses square kernels and 4-connectivity, so nothing else in
  * the segmentation depends on the orientation.
  */
-Map measurements(boolean[] m,int w,int h,boolean vertical){long area=0,sx=0,sy=0;List lines=[]
-    int minX=w,maxX=-1,minY=h,maxY=-1
-    for(int y=0;y<h;y++)for(int x=0;x<w;x++)if(m[y*w+x]){area++;sx+=x;sy+=y
-        if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y}
+/**
+ * Whole-image reductions kept out of `measurements` so they can be statically
+ * compiled. Both walk every pixel, and Groovy's dynamic dispatch on an inner
+ * loop that size costs more than the rest of the pipeline put together.
+ */
+@CompileStatic
+long[] maskExtent(boolean[] m,int w,int h){
+    long area=0,sx=0,sy=0; int minX=w,maxX=-1,minY=h,maxY=-1
+    for(int y=0;y<h;y++){int row=y*w
+        for(int x=0;x<w;x++)if(m[row+x]){area++;sx+=x;sy+=y
+            if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y}}
+    [area,sx,sy,(long)minX,(long)maxX,(long)minY,(long)maxY] as long[]
+}
+
+/** First and last set pixel of every scan line, as pairs; -1,-1 for an empty line. */
+@CompileStatic
+int[] scanRuns(boolean[] m,int w,int h,boolean vertical){
+    int n=vertical?h:w
+    int[] out=new int[2*n]
+    if(vertical){for(int y=0;y<h;y++){int row=y*w,first=-1,last=-1
+        for(int x=0;x<w;x++)if(m[row+x]){if(first<0)first=x;last=x}
+        out[2*y]=first;out[2*y+1]=last}}
+    else{for(int x=0;x<w;x++){int first=-1,last=-1
+        for(int y=0;y<h;y++)if(m[y*w+x]){if(first<0)first=y;last=y}
+        out[2*x]=first;out[2*x+1]=last}}
+    out
+}
+
+/**
+ * The three whole-image mask writes. A NaN cut fails every comparison, which is
+ * what the caller wants: no threshold means no pixels claimed.
+ */
+@CompileStatic
+void maskBelow(float[] src,boolean[] gate,double cut,boolean[] out){
+    for(int i=0;i<out.length;i++) out[i] = gate[i] && src[i]<=cut
+}
+
+@CompileStatic
+void addBelow(float[] src,boolean[] gate,double cut,boolean[] out){
+    for(int i=0;i<out.length;i++) if(gate[i] && src[i]<=cut) out[i]=true
+}
+
+@CompileStatic
+void andMask(boolean[] out,boolean[] gate){
+    for(int i=0;i<out.length;i++) out[i] = out[i] && gate[i]
+}
+
+Map measurements(boolean[] m,int w,int h,boolean vertical){
+    long[] ex=maskExtent(m,w,h)
+    long area=ex[0],sx=ex[1],sy=ex[2]
+    int minX=(int)ex[3],maxX=(int)ex[4],minY=(int)ex[5],maxY=(int)ex[6]
     // Keep where each scan line entered and left the wound, as
     // [startX,startY,endX,endY] in analysis pixels, so every width in the
     // summary can be drawn back onto the image it came from.
-    if(vertical){for(int y=0;y<h;y++){int first=-1,last=-1;for(int x=0;x<w;x++)if(m[y*w+x]){if(first<0)first=x;last=x};if(first>=0)lines<<[first,y,last,y]}}
-    else{for(int x=0;x<w;x++){int first=-1,last=-1;for(int y=0;y<h;y++)if(m[y*w+x]){if(first<0)first=y;last=y};if(first>=0)lines<<[x,first,x,last]}}
+    int[] runs=scanRuns(m,w,h,vertical);List lines=[]
+    if(vertical){for(int y=0;y<h;y++){int first=runs[2*y],last=runs[2*y+1];if(first>=0)lines<<[first,y,last,y]}}
+    else{for(int x=0;x<w;x++){int first=runs[2*x],last=runs[2*x+1];if(first>=0)lines<<[x,first,x,last]}}
     if(area==0)return [area:0,cx:Double.NaN,cy:Double.NaN,length:Double.NaN,meanWidth:Double.NaN,medianWidth:Double.NaN,widthSD:Double.NaN,samples:0,lines:[]]
     // Length runs along the scratch, width across it. Reporting both makes it
     // obvious at a glance whether the orientation was set the right way round.

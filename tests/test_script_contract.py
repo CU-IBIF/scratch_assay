@@ -106,11 +106,51 @@ assert "_debug.txt" in text
 assert "grey 0..255 spans log-variance" in text
 # A flat or empty map must not divide by zero when being scaled.
 assert "if(!Double.isFinite(mn)||!(mx>mn)){ mn=0d; mx=1d }" in text
+# The presence test clears the mask, so it needs its own step: without one the
+# dump makes the next step look like the culprit.
+assert "08_presence_test" in text
+assert "CLEARED HERE" in text
+
+# fillHoles must stay monotone: it may only add pixels. That invariant is what
+# makes "the wound was lost at fill holes" impossible, so pin it rather than
+# trusting a reading of the code.
+_fh = text[text.index("long fillHoles("):]
+_fh = _fh[:_fh.index("\n}")]
+_writes = re.findall(r"mask\[[^\]]*\]\s*=\s*(\w+)", _fh)
+assert _writes == ["true"], f"fillHoles writes {_writes}; it must only set true"
+
 # What the component choice threw away is the point of the dump with debris.
 assert "07_discarded" in text
 assert "boolean[] morphMask = cfg.saveDebug ? pass1 : null" in text
 # Debug images cost memory too, so the budget has to know about them.
 assert "(cfg.saveDebug ? px * 6L : 0L)" in text
+
+# Runtime. Groovy's dynamic dispatch dominates any loop over every pixel, so
+# every whole-image numeric helper is statically compiled. Losing an annotation
+# is silent - the script still works, just many times slower - so count them.
+assert "import groovy.transform.CompileStatic" in text
+_annotated = re.findall(r"@CompileStatic\s*\n\s*(?:[\w.\[\]<>]+(?:\[\])?\s+)?(\w+)\s*\(", text)
+for _fn in ("luminance", "boxSum", "localVariance", "gaussian", "otsu", "morphology",
+            "dilate", "erode", "flood", "largestComponent", "fillHoles", "textureMap",
+            "textureRatio", "maskExtent", "scanRuns", "maskBelow", "addBelow", "andMask"):
+    assert _fn in _annotated, f"{_fn} must be @CompileStatic"
+# The per-pixel work in measurements lives in those two helpers, not inline:
+# the loops left behind run once per scan line, not once per pixel.
+assert "long[] ex=maskExtent(m,w,h)" in text
+assert "int[] runs=scanRuns(m,w,h,vertical)" in text
+# Likewise the three whole-image mask writes.
+assert "maskBelow(texture1, field, cut1, pass1)" in text
+assert "addBelow(texture2, searchBand, cut2, refined)" in text
+assert "andMask(pass1, field)" in text
+# One row of getRGB at a time; per-pixel getRGB is about a third slower again.
+assert "im.getRGB(0,y,w,1,row,0,w)" in text
+
+# The variance pipeline is only built when something downstream reads it. Under
+# a pixel classifier with the presence test off and no second pass, nothing
+# does, and computing it anyway was most of the per-image cost.
+assert "boolean needTexture = (cfg.inputMode != 'Pixel classifier')" in text
+assert "boolean needGray = needTexture || cfg.secondPass" in text
+assert "float[] gray = needGray ? luminance(source) : null" in text
 
 # Width is measured across the scratch. Measuring the transposed axis is what
 # makes a horizontal scratch correct; it must not be reduced to one axis again.

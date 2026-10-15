@@ -173,6 +173,11 @@ def check_helper_extraction():
         assert len(starts) == 1, \
             'expected exactly one definition of %s, got %d' % (name, len(starts))
 
+    # @CompileStatic must come along, or the harness runs code that is an order
+    # of magnitude slower than the analyzer's and is not the same compilation.
+    assert block.count('@CompileStatic') >= 10, \
+        'extraction dropped @CompileStatic annotations'
+
     # Nothing that touches QuPath may come along for the ride.
     for forbidden in ('replaceGeneratedAnnotation', 'PathClassFactory', 'ROIs.',
                       'PathObjects', 'RegionRequest', 'Dialogs'):
