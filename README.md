@@ -258,6 +258,21 @@ Disable the second pass if the classifier boundary should be used without
 variance-based refinement. The saved classifier must be compatible with every
 image in the project (channels, resolution, and features).
 
+In this mode the variance map is built **only if something still reads it**:
+
+| Still needed by | Setting |
+|---|---|
+| the wound presence test | **Minimum texture ratio** above 0 |
+| the second pass | **Second pass refinement** ticked |
+| the `03_texture` dump | **Save debug images** ticked |
+
+With all three off the classifier's own output is the only input, and the
+variance pipeline is skipped outright - about three quarters of the per-image
+compute, so the classifier path runs appreciably faster than the variance one
+rather than slower. Turning the presence test off does mean a classifier that
+finds a wound on a closed sheet is believed; keep a non-zero ratio unless you
+have checked the classifier's behaviour on confluent images.
+
 ## Memory
 
 Memory scales with the *analysis* pixel count, which the downsample controls.
@@ -271,6 +286,47 @@ If you hit that message, in rough order of effect:
 - turn off **Save QC overlays**, then the **second pass**;
 - reduce the **Analysis field (%)**;
 - give QuPath more memory under **Edit > Preferences > Memory**.
+
+## Runtime
+
+Per image, the work scales with the *analysis* pixel count, like memory, so the
+downsample is the main control. On the 480x360 synthetic benchmark the whole
+63-image dataset segments in **18 s** (about 0.25 s an image, warm), measured
+through `benchmark/run_reference_pipeline.py`.
+
+That is **8.1x** faster than the previous version - 2 min 25 s for the same 63
+images - and the two runs agree byte for byte on every row, so the speedup cost
+nothing in accuracy.
+
+The reason is mundane. Groovy dispatches dynamically by default, and in a loop
+over every pixel that cost is paid 170,000 times a frame, which swamped the
+arithmetic. Annotating the numeric helpers `@CompileStatic` removes it; the
+compiler emits the same operations either way, which is why the output is
+identical. Two things had to move for that to work:
+
+- `measurements` cannot be compiled statically as written, because it builds
+  Groovy lists and indexes with `size()/2`, which is a `BigDecimal`. Its two
+  whole-image scans are now `maskExtent` and `scanRuns`, which can be. Measured
+  on one frame: **234 ms -> 13 ms** warm.
+- the three per-pixel mask writes that lived inline in `analyseImage` are now
+  `maskBelow`, `addBelow` and `andMask`.
+
+`tests/test_script_contract.py` counts the annotations and checks that those
+helpers are the ones doing the per-pixel work, because dropping an annotation
+breaks nothing visible - it just makes the script many times slower.
+
+Warm, on one 480x360 frame, the variance pipeline is **49 ms** against **16 ms**
+for everything downstream of it, which is why skipping it matters so much on the
+classifier path. The first image of a run is several times slower than the rest
+regardless: the JVM is still compiling.
+
+If a run is slower than this, in rough order of effect:
+
+- raise the **Downsample**; cost falls with the square;
+- under a pixel classifier, drop the presence test and second pass so the
+  variance map is skipped entirely (see above);
+- turn off **Save debug images**, which writes a PNG per pipeline step;
+- turn off **Save QC overlays** and **Save width profiles**.
 
 ## Synthetic benchmark
 

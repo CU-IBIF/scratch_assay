@@ -39,7 +39,8 @@ from pathlib import Path
 HELPERS = [
     'isHorizontal', 'luminance', 'boxSum', 'localVariance', 'gaussian', 'otsu',
     'morphology', 'dilate', 'erode', 'flood', 'largestComponent', 'fillHoles',
-    'measurements', 'textureMap', 'textureRatio',
+    'measurements', 'maskExtent', 'scanRuns', 'textureMap', 'textureRatio',
+    'maskBelow', 'addBelow', 'andMask',
 ]
 
 DEF_RE = re.compile(
@@ -66,8 +67,13 @@ def extract_helpers(groovy_source, names):
         if start is None:
             missing.append(want)
             continue
-        # Include the doc comment immediately above, for readability.
+        # Carry any annotations immediately above the signature: @CompileStatic
+        # is what makes these run at a sane speed, and dropping it would mean
+        # the harness is not running the same code the analyzer does.
         head = start
+        while head > 0 and lines[head - 1].strip().startswith('@'):
+            head -= 1
+        # Then the doc comment above that, for readability.
         if head > 0 and lines[head - 1].strip().startswith('*/'):
             j = head - 1
             while j > 0 and not lines[j].strip().startswith('/**'):
@@ -132,6 +138,8 @@ def _scan_braces(line):
 
 
 HARNESS = r'''
+import groovy.transform.CompileStatic
+
 import javax.imageio.ImageIO
 import java.awt.image.BufferedImage
 import java.nio.file.*
@@ -160,19 +168,22 @@ def analyse = { BufferedImage src, boolean vertical, Map cfg ->
     }
     double cut1 = otsu(texThr, field)
     boolean[] pass1 = new boolean[w*h]
-    for (int i=0;i<pass1.length;i++) pass1[i] = field[i] && texThr[i] <= cut1
+    maskBelow(texThr, field, cut1, pass1)
     pass1 = morphology(pass1,w,h,cfg.closeIterations as int,cfg.openIterations as int)
 
     def selected = largestComponent(pass1,w,h,cfg.minArea as int)
     boolean[] firstMask = selected == null ? new boolean[w*h] : selected.mask
-    double ratio = (selected == null) ? Double.NaN : textureRatio(texLog, firstMask, field)
+    double ratio = Double.NaN
     String detection = 'FOUND'
-    if (selected != null && !(ratio >= (cfg.minTextureRatio as double))) {
-        selected = null
-        firstMask = new boolean[w*h]
-        detection = 'REJECTED_LOW_CONTRAST'
-    } else if (selected == null) {
+    if (selected == null) {
         detection = 'NOT_FOUND'
+    } else if ((cfg.minTextureRatio as double) > 0d) {
+        ratio = textureRatio(texLog, firstMask, field)
+        if (!(ratio >= (cfg.minTextureRatio as double))) {
+            selected = null
+            firstMask = new boolean[w*h]
+            detection = 'REJECTED_LOW_CONTRAST'
+        }
     }
     long holes = (selected != null && cfg.fillHoles) ? fillHoles(firstMask,w,h) : 0L
     boolean[] finalMask = firstMask
@@ -188,7 +199,7 @@ def analyse = { BufferedImage src, boolean vertical, Map cfg ->
         if (cfg.legacyLinear) for (int i=0;i<tex2.length;i++) tex2[i] = (float)Math.expm1(tex2[i])
         cut2 = otsu(tex2, bandMask)
         boolean[] refined = inner
-        for (int i=0;i<refined.length;i++) if (bandMask[i] && tex2[i] <= cut2) refined[i] = true
+        addBelow(tex2, bandMask, cut2, refined)
         refined = morphology(refined,w,h,cfg.refineCloseIterations as int,cfg.refineOpenIterations as int)
         def best = largestComponent(refined,w,h,1)
         if (best != null) {

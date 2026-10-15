@@ -120,9 +120,14 @@ python3 benchmark/run_reference_pipeline.py --dataset benchmark/dataset
 python3 benchmark/score_against_truth.py --measured benchmark/dataset/reference_measurements.csv
 ```
 
+The 63-image default dataset takes about 18 s.
+
 This lifts the Groovy helper functions out of `ScratchAssayAnalyzer.groovy` at
 run time and executes them verbatim, so the **algorithm** is the real one and
-cannot drift from it. The **orchestration** is mirrored rather than shared,
+cannot drift from it. Helpers are lifted with their annotations, so the
+`@CompileStatic` ones are statically compiled here too - keep an annotation
+directly above its signature, below any doc comment, or the extractor will not
+pick it up and this harness will quietly run the slow path. The **orchestration** is mirrored rather than shared,
 because `analyseImage` is welded to QuPath's project and server objects: the
 sequence tracks that method step for step, but a change to its order of
 operations needs mirroring here too. A real QuPath run stays the authoritative
