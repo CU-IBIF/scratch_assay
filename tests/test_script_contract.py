@@ -106,6 +106,19 @@ assert "_debug.txt" in text
 assert "grey 0..255 spans log-variance" in text
 # A flat or empty map must not divide by zero when being scaled.
 assert "if(!Double.isFinite(mn)||!(mx>mn)){ mn=0d; mx=1d }" in text
+# The presence test clears the mask, so it needs its own step: without one the
+# dump makes the next step look like the culprit.
+assert "08_presence_test" in text
+assert "CLEARED HERE" in text
+
+# fillHoles must stay monotone: it may only add pixels. That invariant is what
+# makes "the wound was lost at fill holes" impossible, so pin it rather than
+# trusting a reading of the code.
+_fh = text[text.index("long fillHoles("):]
+_fh = _fh[:_fh.index("\n}")]
+_writes = re.findall(r"mask\[[^\]]*\]\s*=\s*(\w+)", _fh)
+assert _writes == ["true"], f"fillHoles writes {_writes}; it must only set true"
+
 # What the component choice threw away is the point of the dump with debris.
 assert "07_discarded" in text
 assert "boolean[] morphMask = cfg.saveDebug ? pass1 : null" in text

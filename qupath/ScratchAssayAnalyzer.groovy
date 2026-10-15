@@ -220,20 +220,30 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         } else if (selected == null) {
             detection = 'NOT_FOUND'
         }
+        debugMask(cfg, debugDir, stem, '08_presence_test', firstMask, w, h)
         if (cfg.saveDebug) {
             dbg << 'sheet/wound texture ratio: ' + ratio +
                    ' (minimum ' + cfg.minTextureRatio + ')'
             dbg << 'detection: ' + detection
+            if (detection == 'REJECTED_LOW_CONTRAST')
+                dbg << '08_presence_test: the candidate was CLEARED HERE - it was ' +
+                       'not smooth enough against its surroundings. Everything after ' +
+                       'this step is empty as a consequence, not as a further failure. ' +
+                       'Lower "Minimum sheet/wound texture ratio" (0 disables the test) ' +
+                       'to keep a wound at ratio ' + ratio + '.'
+            else
+                dbg << '08_presence_test: ' + firstMask.count(true) + ' px'
         }
         texture1 = null
 
         // Cells and debris sitting in the gap read as high texture, so they
         // punch holes in the wound. Closing them recovers the true open area.
         long holesFilled = (selected != null && cfg.fillHoles) ? fillHoles(firstMask, w, h) : 0L
-        debugMask(cfg, debugDir, stem, '08_holes_filled', firstMask, w, h)
+        debugMask(cfg, debugDir, stem, '09_holes_filled', firstMask, w, h)
         if (cfg.saveDebug)
-            dbg << '08_holes_filled: ' + firstMask.count(true) + ' px (' +
-                   holesFilled + ' px added)'
+            dbg << '09_holes_filled: ' + firstMask.count(true) + ' px (' +
+                   holesFilled + ' px added; this step only ever adds pixels, ' +
+                   'so it cannot be where a wound was lost)'
         boolean[] finalMask = firstMask
         double cut2 = Double.NaN
         String refineStatus = cfg.secondPass ? 'NO_COMPONENT' : 'DISABLED'
@@ -245,18 +255,18 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
             boolean[] searchBand = new boolean[w*h]
             for (int i=0; i<searchBand.length; i++) searchBand[i] = outer[i] && !inner[i] && field[i]
             outer = null
-            debugMask(cfg, debugDir, stem, '09_refine_band', searchBand, w, h)
+            debugMask(cfg, debugDir, stem, '10_refine_band', searchBand, w, h)
             float[] texture2 = textureMap(gray, w, h, cfg.refineVarianceRadius as int, cfg.refineSmoothSigma as double)
             if (cfg.saveDebug)
-                dbg << debugMap(cfg, debugDir, stem, '10_refine_texture', texture2, w, h, searchBand)
+                dbg << debugMap(cfg, debugDir, stem, '11_refine_texture', texture2, w, h, searchBand)
             cut2 = otsu(texture2, searchBand)
             boolean[] refined = inner
             for (int i=0; i<refined.length; i++) if (searchBand[i] && texture2[i] <= cut2) refined[i] = true
             texture2 = null; searchBand = null
             refined = morphology(refined, w, h, cfg.refineCloseIterations as int, cfg.refineOpenIterations as int)
-            debugMask(cfg, debugDir, stem, '11_refined', refined, w, h)
+            debugMask(cfg, debugDir, stem, '12_refined', refined, w, h)
             if (cfg.saveDebug)
-                dbg << '11_refined (band ' + band + ' analysis px, threshold variance ' +
+                dbg << '12_refined (band ' + band + ' analysis px, threshold variance ' +
                        Math.expm1(cut2) + '): ' + refined.count(true) + ' px'
             Map best = largestComponent(refined, w, h, 1)
             refined = null
@@ -272,7 +282,7 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
         gray = null
         field = null
 
-        debugMask(cfg, debugDir, stem, '12_final', finalMask, w, h)
+        debugMask(cfg, debugDir, stem, '13_final', finalMask, w, h)
 
         Map m = measurements(finalMask, w, h, vertical)
         double areaPx = m.area * dsX * dsY
@@ -285,7 +295,7 @@ Map analyseImage(project, entry, String orientation, Map cfg, Path maskDir, Path
 
         if (cfg.saveDebug) {
             dbg << 'refinement: ' + refineStatus
-            dbg << '12_final: ' + m.area + ' analysis px'
+            dbg << '13_final: ' + m.area + ' analysis px'
             dbg << 'reported width: mean ' + (m.meanWidth*widthScale) +
                    ' full-res px, from ' + m.samples + ' scan lines'
             Files.write(debugDir.resolve(stem + '_debug.txt'), dbg, StandardCharsets.UTF_8)
@@ -759,7 +769,12 @@ String debugMap(Map cfg,Path dir,String stem,String step,float[] v,int w,int h,b
 
 /**
  * Fill background pockets that the mask fully encloses, and return how many
- * pixels were added. Background reachable from the image border is left alone,
+ * pixels were added.
+ *
+ * This only ever sets pixels, never clears them, so the wound it is handed can
+ * grow but can never shrink or disappear. If a wound seems to vanish "at fill
+ * holes", the step before it cleared the mask - most likely the wound-presence
+ * test. The debug dump writes 08_presence_test for exactly that reason. Background reachable from the image border is left alone,
  * so a wound that runs off the edge of the analysis field is not flooded shut -
  * only genuine interior holes, the cells and debris inside the gap, are closed.
  */

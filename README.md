@@ -342,9 +342,18 @@ thresholds, pixel counts and decisions:
 | `05_morphology` | after close/open |
 | `06_largest_component` | the component that was kept |
 | `07_discarded` | **everything the component choice threw away** |
-| `08_holes_filled` | after fill holes |
-| `09_refine_band`, `10_refine_texture`, `11_refined` | the second pass |
-| `12_final` | the mask that was measured |
+| `08_presence_test` | the candidate after the wound-presence test, blank if it was rejected |
+| `09_holes_filled` | after fill holes |
+| `10_refine_band`, `11_refine_texture`, `12_refined` | the second pass |
+| `13_final` | the mask that was measured |
+
+**Read the steps from the last good one forward, and mind which steps can
+subtract.** `09_holes_filled` only ever adds pixels, so a wound cannot be lost
+there; if it looks empty, the mask was already empty when it arrived. The two
+steps that can clear a wound are `06_largest_component`, which keeps only one
+component, and `08_presence_test`, which rejects a candidate that is not smooth
+enough against its surroundings. When the presence test is what cleared it the
+report says so outright, along with the ratio and the setting to change.
 
 With a lot of debris, `07_discarded` is usually the one that answers it. Debris
 scattered through the gap breaks the wound into pieces, and only the largest
