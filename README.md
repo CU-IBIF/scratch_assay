@@ -47,11 +47,12 @@ requires the BaSiC and Grid/Collection Stitching plugins.
 
 The stack exporter reads one 2D TIFF per `Fused/` folder, skips missing or
 ambiguous folders with a Log message, and can use centered or top-left padding.
-Frame indices correspond to **alphabetically sorted timepoint directories**:
-use zero-padded directory names such as `TimePoint_001` to ensure chronological
-order. Padding accommodates different canvas sizes; it does **not** register
-image drift or guarantee the stitched images are aligned. TIFF preserves the
-source pixel type where supported; AVI is an export for visualization and may
+Timepoint folders are found, ordered and selected as in the v1.3 stitcher:
+only `TimePoint_n` folders are used, frames follow the number `n`
+(`TimePoint_2` before `TimePoint_10`, no zero-padding needed), and a typed
+selection such as `1-3,5` refers to those folder numbers. Padding accommodates
+different canvas sizes; it does **not** register image drift or guarantee the
+stitched images are aligned. TIFF preserves the source pixel type where supported; AVI is an export for visualization and may
 use an appropriate codec/color conversion.
 
 See [macros/README.md](macros/README.md) for input layout, detailed usage, and
@@ -499,6 +500,7 @@ Run the repository checks without launching QuPath:
 python3 tests/test_script_contract.py
 python3 tests/test_benchmark.py
 python3 tests/test_basic_stitcher.py
+python3 tests/test_well_timepoint_stacks.py
 ```
 
 `test_basic_stitcher.py` also runs the stitcher macro's helper functions
@@ -507,6 +509,16 @@ to settle how the macro language really behaves:
 
 ```bash
 IJ_JAR=/path/to/Fiji.app/jars/ij-1.54j.jar python3 tests/test_basic_stitcher.py
+```
+
+`test_well_timepoint_stacks.py` checks that the stack macro shares the
+stitcher's time point functions unchanged. With `IJ_JAR` set it also runs the
+whole macro on a synthetic `BaSiC_Stitch_Output` tree and checks which folders
+became which frames. That run uses ImageJ menu commands and so needs a
+display; on a headless machine wrap it in `xvfb-run -a`:
+
+```bash
+IJ_JAR=/path/to/ij.jar xvfb-run -a python3 tests/test_well_timepoint_stacks.py
 ```
 
 The contract test verifies required exports, the CSV contract, memory hygiene,

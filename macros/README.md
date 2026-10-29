@@ -23,12 +23,12 @@ are row-major: left-to-right, then next row). Example raw layout:
 
 ```text
 Experiment/
-  TimePoint_001/
+  TimePoint_1/
     Experiment_A01_s1.tif
     Experiment_A01_s2.tif
     ...
     Experiment_B01_s1.tif
-  TimePoint_002/
+  TimePoint_2/
     ...
 ```
 
@@ -44,14 +44,14 @@ The documented v1.3 output layout is:
 ```text
 BaSiC_Stitch_Output/
   BaSiC_Stitch_Log.txt
-  TimePoint_001/
+  TimePoint_1/
     Experiment_A01/
       Corrected_Tiles/
         Experiment_A01_s1.tif
         ...
       Fused/
         Experiment_A01_BaSiC_Fused.tif
-  TimePoint_002/
+  TimePoint_2/
     Experiment_A01/
       Fused/
         Experiment_A01_BaSiC_Fused.tif
@@ -70,10 +70,24 @@ Run [`Well_Timepoint_Stacks.ijm`](Well_Timepoint_Stacks.ijm). Select
 directory. It expects the `TimePoint/<well>/Fused/` hierarchy above
 with **exactly one TIFF per Fused folder**.
 
-The macro prints numbered timepoint folders to the Fiji Log. Select `all`,
-a range like `1-20`, or a list like `1,3-5,8`. These are **list positions**
-rather than numerical timepoint IDs. Configure frame rate, centered or top-left
-padding, AVI compression, and which outputs to write.
+Timepoint folders are found, ordered and selected the same way as in the v1.3
+stitcher:
+
+- Only subfolders named like `TimePoint_n` are used (case-insensitive; `_`,
+  `-`, a space or no separator before the number). Other folders, such as
+  `Notes/` or `TimePoint_1_old/`, are ignored.
+- Frames follow the **number** in the folder name, so `TimePoint_2` comes
+  before `TimePoint_10`. Zero-padding is not needed. Two folders with the
+  same number (e.g. `TimePoint_1` and `TimePoint_01`) stop the macro, because
+  their frame order would be ambiguous.
+- The dialog lists every timepoint folder with a checkbox, all ticked. Untick
+  the ones to leave out, or type a list such as `1-3,5` to override the boxes.
+  Typed numbers are **timepoint numbers from the folder names**, not positions
+  in the list, so `5` means `TimePoint_5` wherever it appears. A number with no
+  matching folder is reported as an error.
+
+The order used is printed to the Fiji Log. Also choose frame rate, centered or
+top-left padding, AVI compression, and which outputs to write.
 
 For each well, it reads image dimensions in a first pass, then copies the
 original pixels into a common canvas based on the **maximum width and height
@@ -90,11 +104,12 @@ Movie_Output/
 
 **Limitations and checks:**
 
-- Folder ordering is alphabetical. Name timepoints `TimePoint_001`,
-  `TimePoint_002`, etc. to avoid `TimePoint_10` preceding `TimePoint_2`.
 - Missing `Fused/` TIFFs, ambiguous multiple TIFFs, non-2D images, or
   inconsistent bit depths are skipped and recorded in the Log. Consequently
-  stacks can contain different numbers of frames across wells.
+  stacks can contain different numbers of frames across wells, and a frame's
+  position is not always its timepoint. Each slice is labelled with its
+  timepoint folder name; use the labels, not the slice number, to identify
+  the timepoint.
 - Centering assumes any size difference is distributed symmetrically;
   padding does **not** correct drift, spatial translation, or differences
   in mosaic origins. Check alignment when interpreting cell migration.

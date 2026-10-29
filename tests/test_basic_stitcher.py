@@ -38,7 +38,8 @@ def newest_macro():
     def version(path):
         m = re.search(r'_v(\d+)\.(\d+)', path.name)
         return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
-    found = sorted(ROOT.glob('BaSiC_Batch_Tile_Stitcher_v*.ijm'), key=version)
+    found = sorted((ROOT / 'macros').glob('BaSiC_Batch_Tile_Stitcher_v*.ijm'),
+                   key=version)
     assert found, 'no BaSiC_Batch_Tile_Stitcher_v*.ijm found'
     return found[-1]
 
