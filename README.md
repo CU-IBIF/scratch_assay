@@ -1,7 +1,7 @@
 # Scratch Assay Analyzer for QuPath
 
 This repository contains an installable **QuPath Groovy script** that ports the
-core workflow from `Scratch_Assay_Analyzer.ijm` to QuPath. It segments the
+core workflow from [`macros/Scratch_Assay_Analyzer.ijm`](macros/Scratch_Assay_Analyzer.ijm) to QuPath. It segments the
 low-texture gap in phase-contrast images, creates wound annotations, and exports
 measurements and QC images.
 
@@ -16,15 +16,46 @@ joined to whatever experimental design you keep elsewhere.
 - Java 17 or newer (included with normal QuPath distributions)
 
 No ImageJ or third-party QuPath extension is required for the analyzer.
-`Scratch_Assay_Analyzer.ijm` is retained as the reference implementation it was
+[`macros/Scratch_Assay_Analyzer.ijm`](macros/Scratch_Assay_Analyzer.ijm) is retained as the reference implementation it was
 ported from.
 
-`BaSiC_Batch_Tile_Stitcher_v1.3.ijm` is a separate Fiji preprocessing macro:
+[`macros/BaSiC_Batch_Tile_Stitcher_v1.3.ijm`](macros/BaSiC_Batch_Tile_Stitcher_v1.3.ijm) is a separate Fiji preprocessing macro:
 it flat-field corrects tiles with BaSiC and stitches them into one image per
 well. Point it at a parent folder of `TimePoint_1 ... TimePoint_n` subfolders
 and tick which to process, or at a single folder of tiles as before. Each time
 point is corrected on its own tiles, so illumination drift between
 acquisitions is not blurred into one shared shading profile.
+
+## Fiji / ImageJ macros
+
+The [`macros/` directory](macros/) contains four Fiji/ImageJ macros.
+They complement the QuPath analyzer and support tile preprocessing, scratch
+measurement, and time-lapse visualization:
+
+| Macro | Purpose | Typical input → output |
+| --- | --- | --- |
+| [BaSiC tile stitcher v1.3](macros/BaSiC_Batch_Tile_Stitcher_v1.3.ijm) | **Recommended stitcher:** apply BaSiC flat-field correction separately at each selected timepoint, then stitch tiles into a fused image per well. | `TimePoint_n/` with `rootname_A01_s1.tif` tiles → `BaSiC_Stitch_Output/TimePoint_n/<well>/Corrected_Tiles/` and `Fused/` |
+| [BaSiC tile stitcher v1.2](macros/BaSiC_Batch_Tile_Stitcher_v1.2.ijm) | Earlier iteration of the BaSiC + tile stitching workflow, retained for reproducibility / compatibility. Prefer v1.3 for timepoint-folder workflows. | TIFF tile files → corrected tiles and stitched output |
+| [Scratch Assay Analyzer (ImageJ)](macros/Scratch_Assay_Analyzer.ijm) | Original Fiji scratch-assay analysis implementation, retained alongside the [QuPath port](qupath/ScratchAssayAnalyzer.groovy). | Phase-contrast scratch images → scratch/wound measurements; consult macro options for output details |
+| [Well Timepoint Stacks](macros/Well_Timepoint_Stacks.ijm) | Collect one 2D TIFF from each selected `<TimePoint>/<well>/Fused/`, pad differing X/Y dimensions without rescaling, and export a TIFF stack and/or AVI per well. | Fused TIFF images across timepoints → `<well>_timelapse.tif` and `.avi` |
+
+**Common workflow:** run the v1.3 BaSiC stitcher on raw tiles, then
+run the Well Timepoint Stacks macro on the **`BaSiC_Stitch_Output/`**
+directory (not the raw-tile folder). Open `.ijm` scripts in Fiji via
+**Plugins → Macros → Run** or the Fiji script editor. The BaSiC stitcher
+requires the BaSiC and Grid/Collection Stitching plugins.
+
+The stack exporter reads one 2D TIFF per `Fused/` folder, skips missing or
+ambiguous folders with a Log message, and can use centered or top-left padding.
+Frame indices correspond to **alphabetically sorted timepoint directories**:
+use zero-padded directory names such as `TimePoint_001` to ensure chronological
+order. Padding accommodates different canvas sizes; it does **not** register
+image drift or guarantee the stitched images are aligned. TIFF preserves the
+source pixel type where supported; AVI is an export for visualization and may
+use an appropriate codec/color conversion.
+
+See [macros/README.md](macros/README.md) for input layout, detailed usage, and
+limitations for each macro.
 
 ## Install
 
