@@ -76,6 +76,15 @@ def static_checks(raw):
         assert banned not in raw, '%s found: scaling steps were removed' % banned
     assert re.search(r'run\("Add\.\.\.", "value=" \+ offset\)', raw), 'offset step missing'
     assert raw.count('bitDepth() != 16') >= 2, 'reference and target must be checked for 16-bit'
+    # ImageJ assumes a user-defined function returns a number when its call is
+    # an operand of == or != ("Number or numeric function expected"), so a
+    # string result must be stored in a variable before it is compared.
+    for fn in funcs:
+        for m in re.finditer(r'\b%s\s*\([^()]*\)\s*[=!]=|[=!]=\s*%s\s*\(' % (fn, fn), code):
+            line = code.count('\n', 0, m.start()) + 1
+            raise AssertionError('line %d: %s() result compared directly; assign it first'
+                                 % (line, fn))
+
     # A TIFF's saved ROI is restored on open and would confine measuring and Add/Max.
     assert raw.count('run("Select None");') >= 2, 'selections must be cleared after open'
 
