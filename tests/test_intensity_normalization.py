@@ -4,8 +4,8 @@
 - Static checks always run: balanced delimiters; every name a macro function
   reads is a parameter or assigned inside it (ImageJ macro functions cannot see
   top-level variables); no scaling step remains (no Multiply, no 32-bit or
-  8-bit conversion, no ScaleConversions); the macro checks for 16-bit input;
-  the 12-bit clip uses Max... 4095.
+  8-bit conversion, no ScaleConversions); the macro checks for 16-bit input
+  and clears any saved selection after opening; the 12-bit clip uses Max... 4095.
 
 - An end-to-end check runs the whole macro through ImageJ's interpreter on
   synthetic images, with the dialog replaced by fixed answers. Each well's
@@ -76,6 +76,8 @@ def static_checks(raw):
         assert banned not in raw, '%s found: scaling steps were removed' % banned
     assert re.search(r'run\("Add\.\.\.", "value=" \+ offset\)', raw), 'offset step missing'
     assert raw.count('bitDepth() != 16') >= 2, 'reference and target must be checked for 16-bit'
+    # A TIFF's saved ROI is restored on open and would confine measuring and Add/Max.
+    assert raw.count('run("Select None");') >= 2, 'selections must be cleared after open'
 
     # Max... caps at 4095 (Min... would raise every pixel to 4095).
     clip = re.findall(r'run\("(Min|Max)\.\.\.", "value=(\d+)"\)', raw)

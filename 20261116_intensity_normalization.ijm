@@ -95,6 +95,9 @@ for (w = 0; w < wells.length; w++) {
 
     open(refPaths[w]);
 
+    // A saved ROI would limit measuring and Add/Max to that region
+    run("Select None");
+
     if (bitDepth() != 16)
         exit("0 h reference is " + bitDepth() +
             "-bit, expected 16-bit: " + refPaths[w]);
@@ -181,6 +184,9 @@ for (i = 0; i < files.length; i++) {
 
     // Open target image
     open(inputDir + name);
+
+    // A saved ROI would limit measuring and Add/Max to that region
+    run("Select None");
 
     // Only 16-bit single-plane images are processed
     status = "";
