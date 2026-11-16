@@ -72,9 +72,13 @@ for (w = 0; w < wells.length; w++) {
 
         name = files[i];
 
+        // ImageJ treats a user function's result in a comparison as a
+        // number, so read the well into a variable before comparing it
+        nameWell = getWell(name, wells);
+
         if (isTiff(name) &&
             startsWith(name, "0h_") &&
-            getWell(name, wells) == wells[w]) {
+            nameWell == wells[w]) {
 
             refPaths[w] = inputDir + name;
             break;
