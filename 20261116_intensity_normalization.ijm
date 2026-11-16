@@ -1,33 +1,34 @@
 /*
- * Phase-Contrast Batch Normalization
+ * Phase-Contrast Batch Normalization (16-bit, background offset only)
  * Fiji / ImageJ Macro Language (IJM)
  *
- * Each well is normalized to its own 0 h image.
+ * Each well is normalized to its own 0 h image by shifting its median
+ * intensity to the median of that 0 h image. Pixel values are never
+ * multiplied or rescaled, and images stay 16-bit throughout.
  *
  * Wells: A01, A02, A03, B01, B02, B03
  *
  * Transformation:
- *   I_normalized = scale * I_target + offset
+ *   I_normalized = I_target + offset
+ *   offset       = P50_ref - P50_target
  *
- *   scale = (P90_ref - P10_ref) /
- *           (P90_target - P10_target)
- *
- *   offset = P50_ref - scale * P50_target
- *
- * Output: 16-bit TIFF with 12-bit range (0-4095)
+ * Output: 16-bit TIFF clipped to the 12-bit range (0-4095)
  * Originals are never modified.
  *
- * Input: one folder of single-plane TIFFs named <timepoint>_..._<well>.tif,
- * e.g. 0h_Exp_A01.tif, 24h_Exp_A01.tif. The timepoint is the text before the
- * first underscore and must end in "h"; the 0 h reference must start "0h_".
- * Stacks are skipped (logged as SKIPPED_STACK).
+ * Input: one folder of single-plane 16-bit TIFFs named
+ * <timepoint>_..._<well>.tif, e.g. 0h_Exp_A01.tif, 24h_Exp_A01.tif. The
+ * timepoint is the text before the first underscore and must end in "h";
+ * the 0 h reference must start "0h_".
+ * Images that are not 16-bit are skipped (SKIPPED_NOT_16BIT), as are stacks
+ * (SKIPPED_STACK). A 0 h reference that is not a 16-bit single plane stops
+ * the run.
  */
 
 // --------------------------------------------
 // 1. Select input and output folders
 // --------------------------------------------
 
-inputDir = getDirectory("Select folder containing TIFF images");
+inputDir = getDirectory("Select folder containing 16-bit TIFF images");
 if (inputDir == "")
     exit("No input folder selected.");
 
@@ -40,15 +41,12 @@ File.makeDirectory(outputDir);
 
 Dialog.create("Phase-Contrast Batch Normalization");
 
-Dialog.addChoice("Normalization method",
-    newArray("Background + Contrast", "Background Only"),
-    "Background + Contrast");
+Dialog.addMessage("16-bit images only. Background offset, no scaling.");
 
 Dialog.addCheckbox("Copy 0 h reference images", true);
 
 Dialog.show();
 
-method = Dialog.getChoice();
 copyReferences = Dialog.getCheckbox();
 
 // --------------------------------------------
@@ -63,9 +61,7 @@ wells = newArray(
 );
 
 refPaths = newArray(6);
-refP10 = newArray(6);
 refP50 = newArray(6);
-refP90 = newArray(6);
 
 // Find the 0 h reference for each well
 for (w = 0; w < wells.length; w++) {
@@ -99,16 +95,14 @@ for (w = 0; w < wells.length; w++) {
 
     open(refPaths[w]);
 
+    if (bitDepth() != 16)
+        exit("0 h reference is " + bitDepth() +
+            "-bit, expected 16-bit: " + refPaths[w]);
+
     if (nSlices > 1)
         exit("0 h reference is a stack, expected one plane: " + refPaths[w]);
 
-    getRawStatistics(nPixels, mean, min, max, std, hist);
-
-    depth = bitDepth();
-
-    refP10[w] = percentile(hist, min, max, depth, 10);
-    refP50[w] = percentile(hist, min, max, depth, 50);
-    refP90[w] = percentile(hist, min, max, depth, 90);
+    refP50[w] = median16();
 
     close();
 }
@@ -119,10 +113,7 @@ for (w = 0; w < wells.length; w++) {
 
 logPath = outputDir + "normalization_log.csv";
 
-header = "Filename,Well,Timepoint,Method,";
-header += "Ref_P10,Ref_P50,Ref_P90,";
-header += "Target_P10,Target_P50,Target_P90,";
-header += "Scale,Offset,Status\n";
+header = "Filename,Well,Timepoint,Ref_P50,Target_P50,Offset,Status\n";
 
 File.saveString(header, logPath);
 
@@ -174,10 +165,14 @@ for (i = 0; i < files.length; i++) {
 
             open(inputDir + name);
 
-            outputPath = outputDir +
-                stripTiff(name) + "_normalized.tif";
+            if (bitDepth() == 16 && nSlices == 1) {
 
-            saveAs("Tiff", outputPath);
+                outputPath = outputDir +
+                    stripTiff(name) + "_normalized.tif";
+
+                saveAs("Tiff", outputPath);
+            }
+
             close();
         }
 
@@ -187,78 +182,42 @@ for (i = 0; i < files.length; i++) {
     // Open target image
     open(inputDir + name);
 
-    // Math commands without "stack" only change the current slice
-    if (nSlices > 1) {
-        File.append(name + "," + well + "," + timepoint + "," + method +
-            ",,,,,,,,,SKIPPED_STACK\n", logPath);
+    // Only 16-bit single-plane images are processed
+    status = "";
+
+    if (bitDepth() != 16)
+        status = "SKIPPED_NOT_16BIT";
+    else if (nSlices > 1)
+        status = "SKIPPED_STACK";
+
+    if (status != "") {
+
+        File.append(name + "," + well + "," + timepoint + "," +
+            refP50[w] + ",,," + status + "\n", logPath);
+
         close();
         skipped++;
         continue;
     }
 
-    getRawStatistics(nPixels, mean, min, max, std, hist);
-
-    depth = bitDepth();
-
-    tarP10 = percentile(hist, min, max, depth, 10);
-    tarP50 = percentile(hist, min, max, depth, 50);
-    tarP90 = percentile(hist, min, max, depth, 90);
+    tarP50 = median16();
 
     // ----------------------------------------
-    // 7. Calculate linear transformation
+    // 7. Calculate background offset
     // ----------------------------------------
 
-    scale = 1.0;
-
-    if (method == "Background + Contrast") {
-
-        refContrast = refP90[w] - refP10[w];
-        tarContrast = tarP90 - tarP10;
-
-        if (tarContrast <= 0) {
-
-            row = name + "," + well + "," +
-                timepoint + "," + method + ",";
-
-            row += refP10[w] + "," +
-                refP50[w] + "," + refP90[w] + ",";
-
-            row += tarP10 + "," + tarP50 +
-                "," + tarP90 + ",,,";
-
-            row += "SKIPPED_ZERO_CONTRAST\n";
-
-            File.append(row, logPath);
-
-            close();
-            skipped++;
-            continue;
-        }
-
-        scale = refContrast / tarContrast;
-    }
-
-    offset = refP50[w] - scale * tarP50;
+    offset = refP50[w] - tarP50;
 
     // ----------------------------------------
     // 8. Apply normalization
     // ----------------------------------------
 
-    run("32-bit");
-
-    run("Multiply...", "value=" + d2s(scale, 12));
-    run("Add...", "value=" + d2s(offset, 12));
+    // 16-bit arithmetic: results below 0 are set to 0
+    run("Add...", "value=" + offset);
 
     // Clip to 12-bit intensity range
-    // Process > Math > Max lowers pixels above the value; Min raises
-    // pixels below it.
+    // (Process > Math > Max lowers pixels above the value)
     run("Max...", "value=4095");
-    run("Min...", "value=0");
-
-    // Convert to 16-bit without rescaling, then restore the default
-    setOption("ScaleConversions", false);
-    run("16-bit");
-    setOption("ScaleConversions", true);
 
     // ----------------------------------------
     // 9. Save normalized image
@@ -275,18 +234,8 @@ for (i = 0; i < files.length; i++) {
     // 10. Log normalization parameters
     // ----------------------------------------
 
-    row = name + "," + well + "," +
-        timepoint + "," + method + ",";
-
-    row += refP10[w] + "," +
-        refP50[w] + "," + refP90[w] + ",";
-
-    row += tarP10 + "," +
-        tarP50 + "," + tarP90 + ",";
-
-    row += scale + "," + offset + ",OK\n";
-
-    File.append(row, logPath);
+    File.append(name + "," + well + "," + timepoint + "," +
+        refP50[w] + "," + tarP50 + "," + offset + ",OK\n", logPath);
 
     processed++;
 }
@@ -298,11 +247,10 @@ for (i = 0; i < files.length; i++) {
 setBatchMode(false);
 
 print("\\Clear");
-print("PHASE-CONTRAST BATCH NORMALIZATION");
-print("----------------------------------");
+print("PHASE-CONTRAST BATCH NORMALIZATION (16-bit, offset only)");
+print("--------------------------------------------------------");
 print("Input: " + inputDir);
 print("Output: " + outputDir);
-print("Method: " + method);
 print("Processed: " + processed);
 print("Skipped: " + skipped);
 print("Log: " + logPath);
@@ -313,14 +261,15 @@ showMessage("Normalization Complete",
     "\nOutput: " + outputDir);
 
 // --------------------------------------------
-// Helper: Percentile from histogram
+// Helper: Median (P50) of the open 16-bit image
 // --------------------------------------------
 
-// getRawStatistics bins 8- and 16-bit histograms one bin per grey value
-// starting at 0, so bin k is value k. Only 32-bit images get 256 bins spread
-// over min..max.
+// getRawStatistics gives 16-bit images one histogram bin per grey value
+// starting at 0, so bin k is value k and the median is a whole number.
 
-function percentile(hist, min, max, depth, pct) {
+function median16() {
+
+    getRawStatistics(nPixels, mean, min, max, std, hist);
 
     total = 0;
 
@@ -330,21 +279,15 @@ function percentile(hist, min, max, depth, pct) {
     if (total == 0)
         return min;
 
-    threshold = total * pct / 100;
+    threshold = total * 50 / 100;
     cumulative = 0;
 
     for (k = 0; k < hist.length; k++) {
 
         cumulative += hist[k];
 
-        if (cumulative >= threshold) {
-
-            if (depth != 32)
-                return k;
-
-            return min + (max - min) *
-                (k + 0.5) / hist.length;
-        }
+        if (cumulative >= threshold)
+            return k;
     }
 
     return max;

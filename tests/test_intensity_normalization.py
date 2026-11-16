@@ -3,15 +3,15 @@
 
 - Static checks always run: balanced delimiters; every name a macro function
   reads is a parameter or assigned inside it (ImageJ macro functions cannot see
-  top-level variables); the 12-bit clip uses Max... for the ceiling and Min...
-  for the floor; percentile() is told the bit depth, since getRawStatistics
-  bins 8/16-bit histograms one bin per grey value.
+  top-level variables); no scaling step remains (no Multiply, no 32-bit or
+  8-bit conversion, no ScaleConversions); the macro checks for 16-bit input;
+  the 12-bit clip uses Max... 4095.
 
 - An end-to-end check runs the whole macro through ImageJ's interpreter on
-  synthetic 16-bit images, with the dialogs replaced by fixed answers. Each
-  well's 0 h image is a ramp 1000..2000; its 24 h image is a ramp 500..1000.
-  "Background + Contrast" must map 24 h back onto 1000..2000 (scale 2,
-  offset 0); "Background Only" must shift it by +750 (median 1500 - 750).
+  synthetic images, with the dialog replaced by fixed answers. Each well's
+  0 h image is a 16-bit ramp 1000..2000 (median 1500); its 24 h image is a
+  ramp 500..1000 (median 750), so it must be shifted by +750 to 1250..1750
+  with the slope unchanged. An extra 8-bit image must be skipped.
   Point IJ_JAR at an ImageJ jar (or pass --ij-jar) to enable it. It needs a
   display, since Process > Math uses menu commands; headless, use xvfb-run.
 
@@ -51,7 +51,7 @@ def static_checks(raw):
             declared.update(p.split('=')[0].strip() for p in m.group(1).split(','))
 
     funcs = find_functions(lines)
-    for want in ['percentile', 'isTiff', 'stripTiff', 'getWell', 'getTimepoint']:
+    for want in ['median16', 'isTiff', 'stripTiff', 'getWell', 'getTimepoint']:
         assert want in funcs, 'missing function %s' % want
     for name, (start, end, params) in funcs.items():
         body = '\n'.join(lines[start:end + 1])
@@ -60,6 +60,9 @@ def static_checks(raw):
             bound.add(m.group(1))
         for m in re.finditer(r'\bfor\s*\(\s*(\w+)\s*=', body):
             bound.add(m.group(1))
+        # getRawStatistics assigns through its arguments
+        for m in re.finditer(r'\bgetRawStatistics\s*\(([^)]*)\)', body):
+            bound.update(a.strip() for a in m.group(1).split(','))
         unbound = sorted({
             m.group(1) for m in re.finditer(r'\b([A-Za-z_]\w*)\b', body)
             if body[m.end():m.end() + 1] != '('
@@ -68,13 +71,15 @@ def static_checks(raw):
         assert not unbound, \
             'in %s(): %s is not a parameter, global, or local assignment' % (name, unbound)
 
-    # Max... caps at 4095, Min... floors at 0. Swapped, every pixel ends up 0.
-    clip = re.findall(r'run\("(Min|Max)\.\.\.", "value=(\d+)"\)', raw)
-    assert clip == [('Max', '4095'), ('Min', '0')], clip
+    # Offset only: nothing may rescale intensities or change the pixel type.
+    for banned in ['Multiply...', 'Divide...', '"32-bit"', '"8-bit"', 'ScaleConversions']:
+        assert banned not in raw, '%s found: scaling steps were removed' % banned
+    assert re.search(r'run\("Add\.\.\.", "value=" \+ offset\)', raw), 'offset step missing'
+    assert raw.count('bitDepth() != 16') >= 2, 'reference and target must be checked for 16-bit'
 
-    calls = re.findall(r'\bpercentile\(([^)]*)\)', code)
-    for args in calls:
-        assert len(args.split(',')) == 5, 'percentile(%s) needs the bit depth' % args
+    # Max... caps at 4095 (Min... would raise every pixel to 4095).
+    clip = re.findall(r'run\("(Min|Max)\.\.\.", "value=(\d+)"\)', raw)
+    assert clip == [('Max', '4095')], clip
     print('static checks passed')
 
 
@@ -91,15 +96,17 @@ for (w = 0; w < wells.length; w++) {
     saveAs("Tiff", root + "24h_Exp_" + wells[w] + ".tif");
     close();
 }
+newImage("e", "8-bit black", 101, 4, 1);
+saveAs("Tiff", root + "48h_Exp_A01.tif");
+close();
 print("SETUP DONE");
 '''
 
 STUBS = r'''
 function stubDialog_create(t) {}
-function stubDialog_addChoice(l, items, d) {}
+function stubDialog_addMessage(m) {}
 function stubDialog_addCheckbox(l, d) {}
 function stubDialog_show() {}
-function stubDialog_getChoice() { return "%(method)s"; }
 function stubDialog_getCheckbox() { return true; }
 // exit("...") and showMessage would open a dialog and wait forever.
 function stubExit(message) { print("EXIT " + message); exit(); }
@@ -126,46 +133,43 @@ def run_ij(ij_jar, program, td, name):
     return r.stdout + r.stderr
 
 
-def stubbed_macro(raw, root, method):
+def stubbed_macro(raw, root):
     body = re.sub(r'getDirectory\("[^"]*"\)', '"%s"' % root, raw, count=1)
     body = re.sub(r'\bDialog\.(\w+)\(', r'stubDialog_\1(', body)
     body = re.sub(r'\bexit\(', 'stubExit(', body)
     body = re.sub(r'\bshowMessage\(', 'stubShowMessage(', body)
     body = body.replace('print("\\\\Clear");', '')
-    return STUBS % {'method': method} + body
+    return STUBS + body
 
 
 def end_to_end(raw, ij_jar):
-    # x = 0, 25, 50, 75, 100 -> reference 1000, 1250, 1500, 1750, 2000
-    cases = [
-        ('Background + Contrast', '16 1000;1250;1500;1750;2000;', 2.0, 0.0),
-        ('Background Only', '16 1250;1375;1500;1625;1750;', 1.0, 750.0),
-    ]
-    for method, want, scale, offset in cases:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td, 'in').as_posix() + '/'
-            os.makedirs(root)
-            log = run_ij(ij_jar, SETUP % {'root': root}, td, 'setup.ijm')
-            assert 'SETUP DONE' in log, log[-2000:]
-            log = run_ij(ij_jar, stubbed_macro(raw, root, method), td, 'run.ijm')
-            assert 'DONE Processed: 6' in log, '%s: %s' % (method, log[-2000:])
-            out = root + 'normalized/'
-            for well in WELLS:
-                got = run_ij(ij_jar, CHECK % {'path': out + '24h_Exp_%s_normalized.tif' % well},
-                             td, 'check.ijm')
-                m = re.search(r'PIXELS (.*)', got)
-                assert m and m.group(1).strip() == want, \
-                    '%s %s: got %r want %r' % (method, well, m and m.group(1), want)
-                assert os.path.isfile(out + '0h_Exp_%s_normalized.tif' % well)
-            with open(out + 'normalization_log.csv', newline='') as f:
-                rows = list(csv.DictReader(f))
-            assert len(rows) == 6 and all(r['Status'] == 'OK' for r in rows), rows
-            for r in rows:
-                assert (float(r['Ref_P10']), float(r['Ref_P50']), float(r['Ref_P90'])) \
-                    == (1100, 1500, 1900), r
-                assert abs(float(r['Scale']) - scale) < 1e-9, r
-                assert abs(float(r['Offset']) - offset) < 1e-6, r
-            print('ok   %s -> %s' % (method, want))
+    # x = 0, 25, 50, 75, 100 -> 24 h 500..1000 shifted by +750
+    want = '16 1250;1375;1500;1625;1750;'
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td, 'in').as_posix() + '/'
+        os.makedirs(root)
+        log = run_ij(ij_jar, SETUP % {'root': root}, td, 'setup.ijm')
+        assert 'SETUP DONE' in log, log[-2000:]
+        log = run_ij(ij_jar, stubbed_macro(raw, root), td, 'run.ijm')
+        assert 'DONE Processed: 6\nSkipped: 1' in log, log[-2000:]
+        out = root + 'normalized/'
+        for well in WELLS:
+            got = run_ij(ij_jar, CHECK % {'path': out + '24h_Exp_%s_normalized.tif' % well},
+                         td, 'check.ijm')
+            m = re.search(r'PIXELS (.*)', got)
+            assert m and m.group(1).strip() == want, \
+                '%s: got %r want %r' % (well, m and m.group(1), want)
+            assert os.path.isfile(out + '0h_Exp_%s_normalized.tif' % well)
+        assert not os.path.exists(out + '48h_Exp_A01_normalized.tif'), '8-bit image was written'
+        with open(out + 'normalization_log.csv', newline='') as f:
+            rows = {r['Filename']: r for r in csv.DictReader(f)}
+        assert rows['48h_Exp_A01.tif']['Status'] == 'SKIPPED_NOT_16BIT', rows
+        ok = [r for r in rows.values() if r['Status'] == 'OK']
+        assert len(ok) == 6, rows
+        for r in ok:
+            assert (float(r['Ref_P50']), float(r['Target_P50']), float(r['Offset'])) \
+                == (1500, 750, 750), r
+        print('ok   offset only -> %s, 8-bit skipped' % want)
     print('end-to-end checks passed (real ImageJ interpreter)')
 
 
