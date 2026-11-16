@@ -58,6 +58,36 @@ use an appropriate codec/color conversion.
 See [macros/README.md](macros/README.md) for input layout, detailed usage, and
 limitations for each macro.
 
+### Intensity normalization (16-bit)
+
+[`20261116_intensity_normalization.ijm`](20261116_intensity_normalization.ijm),
+in the repository root, evens out brightness drift between time points in
+phase-contrast images before analysis. Each well (A01–A03, B01–B03) is
+normalized to its own 0 h image by a **background offset only**:
+
+```
+I_normalized = I + (P50_ref - P50_target)
+```
+
+where P50 is the median grey value of the well's 0 h image (`ref`) and of the
+image being normalized (`target`). Pixel values are never multiplied or
+rescaled, and images stay 16-bit throughout.
+
+- **Input:** one folder of single-plane **16-bit** TIFFs named
+  `<timepoint>_..._<well>.tif`, e.g. `0h_Exp_A01.tif`, `24h_Exp_A01.tif`. The
+  timepoint is the text before the first underscore and must end in `h`; every
+  well needs a `0h_` image. If a well has several, the first is used.
+- **Output:** `<input>/normalized/<name>_normalized.tif`, clipped to the 12-bit
+  range 0–4095, plus `normalization_log.csv` with columns
+  `Filename, Well, Timepoint, Ref_P50, Target_P50, Offset, Status`. With
+  **Copy 0 h reference images** ticked, the 0 h images are copied there
+  unchanged (not clipped). Originals are never modified.
+- **Skipped:** images that are not 16-bit (`SKIPPED_NOT_16BIT`), stacks
+  (`SKIPPED_STACK`), and files whose name has no recognised timepoint or well.
+  A 0 h image that is not a single 16-bit plane stops the run.
+
+Run it from Fiji via **Plugins → Macros → Run** and pick the input folder.
+
 ## Install
 
 1. In QuPath, choose **Automate > Show script editor**.
@@ -501,6 +531,7 @@ python3 tests/test_script_contract.py
 python3 tests/test_benchmark.py
 python3 tests/test_basic_stitcher.py
 python3 tests/test_well_timepoint_stacks.py
+python3 tests/test_intensity_normalization.py
 ```
 
 `test_basic_stitcher.py` also runs the stitcher macro's helper functions
@@ -519,6 +550,16 @@ display; on a headless machine wrap it in `xvfb-run -a`:
 
 ```bash
 IJ_JAR=/path/to/ij.jar xvfb-run -a python3 tests/test_well_timepoint_stacks.py
+```
+
+`test_intensity_normalization.py` checks that the normalization macro has no
+scaling steps, requires 16-bit input and clips with `Max...` 4095. With
+`IJ_JAR` set it also runs the macro on synthetic 16-bit ramps, checks that
+each 24 h image is shifted by exactly the median difference with its slope
+unchanged, and that an 8-bit image is skipped. It also needs a display:
+
+```bash
+IJ_JAR=/path/to/ij.jar xvfb-run -a python3 tests/test_intensity_normalization.py
 ```
 
 The contract test verifies required exports, the CSV contract, memory hygiene,
