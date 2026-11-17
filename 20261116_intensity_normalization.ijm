@@ -12,7 +12,8 @@
  *   I_normalized = I_target + offset
  *   offset       = P50_ref - P50_target
  *
- * Output: 16-bit TIFF clipped to the 12-bit range (0-4095)
+ * Output: 16-bit TIFF using the full 16-bit range (0-65535); there is no
+ * 12-bit cap. Results below 0 become 0 and above 65535 become 65535.
  * Originals are never modified.
  *
  * Input: one folder of single-plane 16-bit TIFFs named
@@ -222,12 +223,9 @@ for (i = 0; i < files.length; i++) {
     // 8. Apply normalization
     // ----------------------------------------
 
-    // 16-bit arithmetic: results below 0 are set to 0
+    // 16-bit arithmetic keeps results within 0-65535: below 0 becomes 0,
+    // above 65535 becomes 65535. No 12-bit (4095) cap is applied.
     run("Add...", "value=" + offset);
-
-    // Clip to 12-bit intensity range
-    // (Process > Math > Max lowers pixels above the value)
-    run("Max...", "value=4095");
 
     // ----------------------------------------
     // 9. Save normalized image
