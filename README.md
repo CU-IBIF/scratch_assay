@@ -77,11 +77,13 @@ rescaled, and images stay 16-bit throughout.
   `<timepoint>_..._<well>.tif`, e.g. `0h_Exp_A01.tif`, `24h_Exp_A01.tif`. The
   timepoint is the text before the first underscore and must end in `h`; every
   well needs a `0h_` image. If a well has several, the first is used.
-- **Output:** `<input>/normalized/<name>_normalized.tif`, clipped to the 12-bit
-  range 0–4095, plus `normalization_log.csv` with columns
+- **Output:** `<input>/normalized/<name>_normalized.tif` as 16-bit, using the
+  full 0–65535 range (no 12-bit cap, so 12-bit and full 16-bit data both work;
+  results below 0 become 0 and above 65535 become 65535), plus
+  `normalization_log.csv` with columns
   `Filename, Well, Timepoint, Ref_P50, Target_P50, Offset, Status`. With
   **Copy 0 h reference images** ticked, the 0 h images are copied there
-  unchanged (not clipped). Originals are never modified.
+  unchanged. Originals are never modified.
 - **Skipped:** images that are not 16-bit (`SKIPPED_NOT_16BIT`), stacks
   (`SKIPPED_STACK`), and files whose name has no recognised timepoint or well.
   A 0 h image that is not a single 16-bit plane stops the run.
@@ -553,8 +555,9 @@ IJ_JAR=/path/to/ij.jar xvfb-run -a python3 tests/test_well_timepoint_stacks.py
 ```
 
 `test_intensity_normalization.py` checks that the normalization macro has no
-scaling steps, requires 16-bit input and clips with `Max...` 4095. With
-`IJ_JAR` set it also runs the macro on synthetic 16-bit ramps, checks that
+scaling steps, requires 16-bit input and applies no 12-bit (4095) cap. With
+`IJ_JAR` set it also runs the macro on synthetic 16-bit ramps well above 4095,
+checks that
 each 24 h image is shifted by exactly the median difference with its slope
 unchanged, and that an 8-bit image is skipped. It also needs a display:
 

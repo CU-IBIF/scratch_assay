@@ -5,13 +5,15 @@
   reads is a parameter or assigned inside it (ImageJ macro functions cannot see
   top-level variables); no scaling step remains (no Multiply, no 32-bit or
   8-bit conversion, no ScaleConversions); the macro checks for 16-bit input
-  and clears any saved selection after opening; the 12-bit clip uses Max... 4095.
+  and clears any saved selection after opening; nothing clips to a 12-bit
+  (4095) maximum, since some data use the full 16-bit range.
 
 - An end-to-end check runs the whole macro through ImageJ's interpreter on
   synthetic images, with the dialog replaced by fixed answers. Each well's
-  0 h image is a 16-bit ramp 1000..2000 (median 1500); its 24 h image is a
-  ramp 500..1000 (median 750), so it must be shifted by +750 to 1250..1750
-  with the slope unchanged. An extra 8-bit image must be skipped.
+  0 h image is a 16-bit ramp 40000..50000 (median 45000); its 24 h image is
+  a ramp 20000..25000 (median 22500), so it must be shifted by +22500 to
+  42500..47500 with the slope unchanged. Values far above 4095 must survive.
+  An extra 8-bit image must be skipped.
   Point IJ_JAR at an ImageJ jar (or pass --ij-jar) to enable it. It needs a
   display, since Process > Math uses menu commands; headless, use xvfb-run.
 
@@ -88,9 +90,12 @@ def static_checks(raw):
     # A TIFF's saved ROI is restored on open and would confine measuring and Add/Max.
     assert raw.count('run("Select None");') >= 2, 'selections must be cleared after open'
 
-    # Max... caps at 4095 (Min... would raise every pixel to 4095).
-    clip = re.findall(r'run\("(Min|Max)\.\.\.", "value=(\d+)"\)', raw)
-    assert clip == [('Max', '4095')], clip
+    # No 12-bit cap: some data are full 16-bit, and 16-bit Add already keeps
+    # results within 0..65535.
+    # Search with comments removed but strings kept: the clip value is a string.
+    no_comments = re.sub(r'//[^\n]*', '', re.sub(r'/\*.*?\*/', '', raw, flags=re.S))
+    assert not re.search(r'run\("(Min|Max)\.\.\."', no_comments), 'Min/Max clip found'
+    assert '4095' not in no_comments, '12-bit (4095) assumption found'
     print('static checks passed')
 
 
@@ -99,11 +104,11 @@ root = "%(root)s";
 wells = newArray("A01", "A02", "A03", "B01", "B02", "B03");
 for (w = 0; w < wells.length; w++) {
     newImage("r", "16-bit black", 101, 4, 1);
-    for (y = 0; y < 4; y++) for (x = 0; x < 101; x++) setPixel(x, y, 1000 + 10 * x);
+    for (y = 0; y < 4; y++) for (x = 0; x < 101; x++) setPixel(x, y, 40000 + 100 * x);
     saveAs("Tiff", root + "0h_Exp_" + wells[w] + ".tif");
     close();
     newImage("t", "16-bit black", 101, 4, 1);
-    for (y = 0; y < 4; y++) for (x = 0; x < 101; x++) setPixel(x, y, 500 + 5 * x);
+    for (y = 0; y < 4; y++) for (x = 0; x < 101; x++) setPixel(x, y, 20000 + 50 * x);
     saveAs("Tiff", root + "24h_Exp_" + wells[w] + ".tif");
     close();
 }
@@ -154,8 +159,8 @@ def stubbed_macro(raw, root):
 
 
 def end_to_end(raw, ij_jar):
-    # x = 0, 25, 50, 75, 100 -> 24 h 500..1000 shifted by +750
-    want = '16 1250;1375;1500;1625;1750;'
+    # x = 0, 25, 50, 75, 100 -> 24 h 20000..25000 shifted by +22500
+    want = '16 42500;43750;45000;46250;47500;'
     with tempfile.TemporaryDirectory() as td:
         root = Path(td, 'in').as_posix() + '/'
         os.makedirs(root)
@@ -179,7 +184,7 @@ def end_to_end(raw, ij_jar):
         assert len(ok) == 6, rows
         for r in ok:
             assert (float(r['Ref_P50']), float(r['Target_P50']), float(r['Offset'])) \
-                == (1500, 750, 750), r
+                == (45000, 22500, 22500), r
         print('ok   offset only -> %s, 8-bit skipped' % want)
     print('end-to-end checks passed (real ImageJ interpreter)')
 
