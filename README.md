@@ -61,32 +61,44 @@ limitations for each macro.
 ### Intensity normalization (16-bit)
 
 [`20261116_intensity_normalization.ijm`](20261116_intensity_normalization.ijm),
-in the repository root, evens out brightness drift between time points in
-phase-contrast images before analysis. Each well (A01–A03, B01–B03) is
-normalized to its own 0 h image by a **background offset only**:
+in the repository root, evens out brightness drift between time points before
+analysis. Each well (A01–A03, B01–B03) is normalized to its own 0 h image
+(`ref`). Choose the method in the dialog:
 
-```
-I_normalized = I + (P50_ref - P50_target)
-```
+| Method | Mapping | Matches exactly |
+| --- | --- | --- |
+| **Brightfield linear (mode exact)** *(default)* | one straight line: `I_norm = Mode_ref + scale × (I − Mode)`, with `scale = (High_ref − Low_ref) / (High − Low)` | the mode; low/high only approximately |
+| **Brightfield two-segment (min, mode, max exact)** | two straight lines joined at the mode, one slope below it (`(Mode_ref − Low_ref) / (Mode − Low)`) and one above it (`(High_ref − Mode_ref) / (High − Mode)`) | low, mode and high |
+| **Median offset (shift only)** | `I_norm = I + (P50_ref − P50)`, no scaling | the median |
 
-where P50 is the median grey value of the well's 0 h image (`ref`) and of the
-image being normalized (`target`). Pixel values are never multiplied or
-rescaled, and images stay 16-bit throughout.
+The **mode** is the most frequent grey value, which in brightfield is the
+background. **Low** and **High** are percentiles set in the dialog (default
+0.1 and 99.9) rather than the true extremes, so a few dust specks or hot
+pixels cannot swing the mapping; enter 0 and 100 to use the true minimum and
+maximum. The percentiles are not used by the median offset method.
 
 - **Input:** one folder of single-plane **16-bit** TIFFs named
   `<timepoint>_..._<well>.tif`, e.g. `0h_Exp_A01.tif`, `24h_Exp_A01.tif`. The
   timepoint is the text before the first underscore and must end in `h`; every
   well needs a `0h_` image. If a well has several, the first is used.
 - **Output:** `<input>/normalized/<name>_normalized.tif` as 16-bit, using the
-  full 0–65535 range (no 12-bit cap, so 12-bit and full 16-bit data both work;
-  results below 0 become 0 and above 65535 become 65535), plus
-  `normalization_log.csv` with columns
-  `Filename, Well, Timepoint, Ref_P50, Target_P50, Offset, Status`. With
+  full 0–65535 range (no 12-bit cap, so 12-bit and full 16-bit data both work).
+  The brightfield methods compute in 32-bit and round back to 16-bit; results
+  below 0 become 0 and above 65535 become 65535. With
   **Copy 0 h reference images** ticked, the 0 h images are copied there
   unchanged. Originals are never modified.
+- **Log:** `normalization_log.csv` with columns
+  `Filename, Well, Timepoint, Method, Low_Pct, High_Pct, Ref_Low, Ref_Center,
+  Ref_High, Target_Low, Target_Center, Target_High, Slope_Below, Slope_Above,
+  Status`. *Center* is the mode for the brightfield methods and the median for
+  the median offset method. For the one-line method both slopes are the same;
+  for the median offset both are 1.
 - **Skipped:** images that are not 16-bit (`SKIPPED_NOT_16BIT`), stacks
-  (`SKIPPED_STACK`), and files whose name has no recognised timepoint or well.
-  A 0 h image that is not a single 16-bit plane stops the run.
+  (`SKIPPED_STACK`), images whose mapping is undefined because a range is zero,
+  e.g. the mode equals the low percentile in the two-segment method
+  (`SKIPPED_ZERO_RANGE`), and files whose name has no recognised timepoint or
+  well. A 0 h image that is not a single 16-bit plane stops the run, as do
+  percentiles that are not `0 ≤ low < high ≤ 100`.
 
 Run it from Fiji via **Plugins → Macros → Run** and pick the input folder.
 
@@ -554,12 +566,14 @@ display; on a headless machine wrap it in `xvfb-run -a`:
 IJ_JAR=/path/to/ij.jar xvfb-run -a python3 tests/test_well_timepoint_stacks.py
 ```
 
-`test_intensity_normalization.py` checks that the normalization macro has no
-scaling steps, requires 16-bit input and applies no 12-bit (4095) cap. With
-`IJ_JAR` set it also runs the macro on synthetic 16-bit ramps well above 4095,
-checks that
-each 24 h image is shifted by exactly the median difference with its slope
-unchanged, and that an 8-bit image is skipped. It also needs a display:
+`test_intensity_normalization.py` checks that the normalization macro offers
+the three methods with brightfield linear as the default, reads its dialog in
+order, requires 16-bit input, restores Fiji's conversion setting and applies no
+12-bit (4095) cap. With `IJ_JAR` set it also runs every method on synthetic
+16-bit images well above 4095, with an off-centre background peak so the
+methods give different results, and compares the output pixels and log with
+hand-worked values. It also checks that an 8-bit image is skipped and that bad
+percentiles stop the run. It also needs a display:
 
 ```bash
 IJ_JAR=/path/to/ij.jar xvfb-run -a python3 tests/test_intensity_normalization.py
